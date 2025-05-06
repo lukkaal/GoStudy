@@ -1,0 +1,26 @@
+1）切片本质
+type slice struct {
+    ptr *T     // 指向底层数组的指针
+    len int    // 当前长度
+    cap int    // 容量
+}
+重点：
+切片变量 a、b 本身是结构体（slice header），位于栈上；
+它们指向的底层数组在堆上。
+->
+浅拷贝：赋值操作 =
+a := []int{1, 2, 3}
+b := a       // 浅拷贝
+a 和 b 共享同一个底层数组,所以修改 b[0]，会影响 a[0]
+->
+深拷贝：使用 copy
+a := []int{1, 2, 3}
+b := make([]int, len(a)) // 新建一个切片，有独立的底层数组
+copy(b, a) 
+copy(b, a) 把 a 的值复制到了 b 的新数组中。
+它们拥有不同的底层数组，互不影响。
+
+2）package main/ others
+package main 用途	其他包名 用途
+编译成可执行文件		编译成库（import 使用）
+必须包含 func main()	不允许包含 main()
