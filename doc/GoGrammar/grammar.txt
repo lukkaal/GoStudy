@@ -24,3 +24,27 @@ copy(b, a) 把 a 的值复制到了 b 的新数组中。
 package main 用途	其他包名 用途
 编译成可执行文件		编译成库（import 使用）
 必须包含 func main()	不允许包含 main()
+
+
+3）make
+make 只用于以下三种类型：
+slice（切片）
+map（映射）
+channel（通道）
+
+
+
+4）map 引用类型
+初始化：使用make进行初始化操作（声明 不等于 初始化），也可以直接构造
+->
+m := map[string]int{"bob": 18, "alice": 25} 直接构造
+->
+var personDB map[string]PersonInfo
+personDB = make(map[string]PersonInfo)
+查找
+person, ok := personDB["1234"]，即value 和 bool（用于判断是否存在key-value）
+->二维map
+var usrdata map[string]map[string]int
+usrdata = make(map[string]map[string]int)
+m := make(map[string]int, 10)	创建了一个容量为 10 的 map
+
