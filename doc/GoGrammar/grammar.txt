@@ -19,11 +19,33 @@ b := make([]int, len(a)) // 新建一个切片，有独立的底层数组
 copy(b, a) 
 copy(b, a) 把 a 的值复制到了 b 的新数组中。
 它们拥有不同的底层数组，互不影响。
+数组和slice不同
+slice可以动态扩容，初始化的时候用数组可行，等价于这个slice底层指针指向了这个数组；
+slice标准的深拷贝是先make之后，使用copy；因为make会分配新的内存
+->
+->
+使用数组和slice的重点：
+第一次 append 操作：在 arr[:] 切片中，s 最初指向 arr 数组的底层内存。此时，s 的容量是 5（和数组相同），无法扩容。
+扩容：当调用 append(s, 6) 时，切片的容量被超出了原数组的容量（5）。Go 会为切片分配一个新的底层数组（容量通常是原来容量的两倍），并将原数组中的数据复制到新数组中。此时，s 不再指向原数组 arr 的内存，而是指向 **新分配的内存** ，arr 的内容没有变化。
+->> 拓展切片
+s := make([]int, 5, 10)
+->s = append(s, 6)  // 这时切片的长度会变成 6
+->s = s[:6]  // 手动扩展切片长度，这里新长度为 6
+    s[5] = 6   // 给第 6 个元素赋值
+之后就可以访问了
+
+| 类型      | 是引用类型 | 修改元素会影响外部 | 修改结构（如 append、新建）是否影响外部 |
+| ------- | ----- | --------- | ----------------------- |
+| slice   | 是     | ✅ 是       | ❌ 否（除非传 `*[]T`）         |
+| map     | 是     | ✅ 是       | ✅ 是                     |
+| channel | 是     | ✅ 是       | ✅ 是                     |
+
 
 2）package main/ others
 package main 用途	其他包名 用途
 编译成可执行文件		编译成库（import 使用）
 必须包含 func main()	不允许包含 main()
+
 
 
 3）make
@@ -35,6 +57,19 @@ channel（通道）
 
 
 4）map 引用类型
+map 的本质是一个指向运行时 map 结构体的指针
+本质上也是一次浅拷贝， 拷贝的是 map 的“引用（指针）”，而不是底层的数据结构
+->
+type hmap struct {
+    // 若干桶 bucket 指针
+    // 哈希函数状态
+    // 其他元数据
+}
+
+type mapType struct {
+    h *hmap  // map 是对 hmap 的一个指针引用
+}
+
 初始化：使用make进行初始化操作（声明 不等于 初始化），也可以直接构造
 ->
 m := map[string]int{"bob": 18, "alice": 25} 直接构造
@@ -47,4 +82,165 @@ person, ok := personDB["1234"]，即value 和 bool（用于判断是否存在key
 var usrdata map[string]map[string]int
 usrdata = make(map[string]map[string]int)
 m := make(map[string]int, 10)	创建了一个容量为 10 的 map
+
+
+
+5）: 和 :=
+| 语法     | 本质含义               | 适用场景                      | 是否声明变量 | 是否初始化值    | 特殊说明                 |
+| ------ | ------------------ | ------------------------- | ------ | --------- | -------------------- |
+| `:=`   | **声明并初始化**变量       | 函数内部，首次定义变量               | ✅ 是    | ✅ 是       | 自动类型推导               |
+| `=`    | **赋值/重新绑定**已有变量    | 变量已声明过                    | ❌ 否    | ✅ 是       | 不能用于未声明变量            |
+| `make` | **分配并初始化**引用类型底层结构 | 用于构造 `map`、`slice`、`chan` | ❌ 否    | ✅ 是（返回新值） | 通常配合 `:=` 或 `var =` 使用 |
+
+
+
+6）slice 和 map
+map：会根据存储的元素动态扩展底层数据结构。当元素增加时，map 会自动调整容量，以保证高效的查找、插入和删除操作。（哈希表）
+slice：底层数组容量有限，当元素数量超过容量时，Go 会自动分配更大的内存空间并复制旧数据到新空间，实现动态扩展。（动态数组 std:vector）
+->
+map 的扩展：map 会根据负载因子和哈希冲突动态扩展，其扩展机制并不像 slice 那样是倍数增长的，它的扩展相对更复杂，并且涉及哈希表的重建。
+slice 的扩展：slice 每次扩展通常是容量的两倍，这样做的好处是减少了扩展的次数，从而提高了性能。
+
+
+7）function
+func 函数名(函数参数)返回值类型{ }
+golang 允许函数返回多个返回值
+->
+func Add(a int, b int) (ret int, err error) {
+	if a < 0 || b < 0 {
+		//不允许负数相加
+		err = errors.New("should be non-negative numbers")
+		return
+	}
+	return a + b, nil
+}
+nil 表示“空值”或“不存在”相当于 cpp 中的 nullptr
+
+->
+可变参数（可变数量，不是类型）
+可变参数允许你向函数传入不定数量的参数，写法是在参数类型前加 ...（三个点）
+func myfuncv(args ...int) {
+	for _, arg := range args {
+		fmt.Println(arg)
+	}
+}
+使用 range 可以实现遍历
+
+->特殊的可变参数
+func myfunc(args ...interface{}) {
+    for _, arg := range args { // 前一个参数代表索引，不需要的话可以用 _ 代替
+        fmt.Println(arg)
+	❌fmt.PrintIn(arg.(type)) // .(type)：只能在 switch 语句中使用，用来检查一个接口值的动态类型。
+    }
+}
+args ...interface{} 是 Go 中可变参数的一种特殊形式，用于接收任意类型的任意多个参数。
+args 是一个空接口类型切片：[]interface{}
+
+
+8）方法的接收者 
+Go 中，用接收者（receiver）来定义方法，类似于C++的成员函数
+type Integer int 
+func (a Integer) Less(b Integer) bool {
+    return a < b
+}
+但是有趣的是，可以为变量也绑定专门的方法。
+| 项目     | 函数（Function）            | 方法（Method）                        |
+| ------ | ----------------------- | --------------------------------- |
+| 是否有接收者 | ❌ 没有接收者                 | ✅ 有接收者（如 `func (p *Plane) Fly()`） |
+| 调用方式   | `FunctionName(args...)` | `instance.MethodName(args...)`    |
+| 是否绑定对象 | 否，只和包关联                 | 是，绑定到某种类型                         |
+| 是否可以重名 | ❌（在同一个包内不能重名）           | ✅ 不同类型的方法可以同名                     |
+“对象在执行操作”
+&
+“函数对对象执行操作”
+
+9）结构体 struct
+golang结构体没有public,private等字段，是通过成员的大小写区分权限的。
+大写的结构体成员，别的包可以访问，小写的成员不可被别的包访问，也就无法被初始化。
+Rect的成员都为小写，所以别的包无法访问，但是可以通过定义大写的方法，提供给别的包访问
+->那么如何初始化这个 Rect 结构体呢？
+大写的构造函数 + 大写的方法 -> 另一个包当中 import 之后调用
+func (结构体指针/ 值 ) 方法名(方法参数列表) 方法返回值{
+    //方法内部实现
+}
+如果两个结构体类型，顺序相同，且不含有无法比较类型(slice, map),则可以进行比较
+
+10）关于 CPP 和 GO 在封装上的不同之处
+| 特性          | Go             | C++              |
+| ----------- | -------------- | ---------------- |
+| 非公开字段能否初始化  | ❌ 不可以，除非通过构造函数 | ✅ 可以（通过构造函数）     |
+| 默认封装粒度      | 基于标识符大小写（包级别）  | 明确的访问修饰符控制（类级别）  |
+| 使用字面量初始化的限制 | 有：只能初始化导出字段    | 无：可以构造对象，字段访问再控制 |
+CPP:
+只要 #include 引入了相应的头文件，且构造函数是 public 的，即使类的成员变量是 private 或 protected，也可以在外部进行对象的初始化。
+成员变量的访问权限控制并不影响对象的构造，只影响成员变量的访问权限
+
+GO:
+字段的访问权限是由字段首字母的大小写决定的。小写字段是私有的，无法在外部包中直接访问，甚至无法通过结构体字面量进行初始化。
+如果字段是小写（私有字段），那么就无法在外部直接访问或初始化这些字段。必须通过构造函数来初始化，或者通过提供的公开方法来访问它们。
+
+
+11）组合（golang的精髓）
+//匿名指针组合
+type DerivePoint struct {
+	*Base
+}
+func (derivep *DerivePoint) Foo() bool {
+	fmt.Println("this is DerivePoint Foo")
+	fmt.Println("inherit base ,name is ", derivep.Name)
+	return true
+}
+->实际调用：显示初始化基类指针
+dr := &DerivePoint{Base: &Base{Name: "base"}}
+dr.Foo()
+
+
+12）interface 接口
+type Bird interface {
+	Fly() string
+}
+接口是 Go 中实现“多态性”的关键机制，任何实现了接口中所有方法的类型，都隐式地实现了该接口。
+-> 实现这个接口
+type Plane struct {
+	name string
+}
+func (p *Plane) Fly() string { ... }
+->>
+只有指向结构体的指针类型（*Plane, *Butterfly）才拥有 Fly() 方法。
+结构体值类型（如 Plane、Butterfly）不自动拥有 Fly() 方法。
+-> 主函数当中，使用接口指针指向具体实现的struct所在地址（很像多态）
+func main() {
+	var b Bird
+
+	p := &Plane{name: "Boeing"}
+	b = p
+	b.Fly() // 输出：Boeing  can fly like a bird
+}
+->
+Fly() string 是签名
+func (s Sparrow) Fly() string {
+    return "Sparrow is flying"
+} 是具体实现
+
+
+13）Go 接口 vs C++ 继承的对比
+| 特性     | Go 接口机制                       | C++ 继承机制                              |
+| ------ | ----------------------------- | ------------------------------------- |
+| 接口实现方式 | **隐式实现**（无需 `implements` 关键字） | **显式声明**（使用 `: public Base`）          |
+| 多态支持   | 接口变量可接收任何实现了接口的类型             | 通过基类指针或引用调用虚函数                        |
+| 成员访问控制 | 大写表示导出（公有），小写表示私有             | 使用 `public` / `protected` / `private` |
+| 多继承支持  | 不支持多继承，但支持多接口组合               | 支持多继承（可能会导致菱形继承）                      |
+| 方法绑定   | 显式绑定在类型（或指针）上                 | 自动绑定在类上，支持虚函数表（vtable）                |
+->
+Go 更加关注组合而非继承（“组合优于继承”）
+Go 的接口更加灵活：不需要像 C++ 那样提前声明继承关系，只要你实现了接口的方法，就自动实现了该接口。
+
+
+14）接口类型转换和判断
+func GetFlyType(bird Bird) {
+	_, ok := bird.(*Butterfly)
+...
+类型断言（Type Assertion），用于判断
+两个结构体的指针类型都实现了 Fly() 方法，所以都实现了 Bird 接口 -> 也因此可以把 *Plane 或 *Butterfly 赋值给类型为 Bird 的变量
+
 

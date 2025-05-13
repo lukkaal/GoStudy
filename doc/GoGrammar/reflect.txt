@@ -1,0 +1,117 @@
+为什么使用反射
+->
+序列化与反序列化：
+在序列化和反序列化的过程中，尤其是当处理 JSON、XML 等格式时，反射非常有用。
+反射可以自动地从结构体中提取字段，并将其转换为相应的格式（例如 JSON）。
+主要意义就是提供运行时动态操作类型和数据的能力。
+它允许我们在不确定类型的情况下执行动态操作，支持编写更灵活、通用的代码
+尤其在处理多种类型的库、框架和序列化任务时非常有用。
+
+
+
+1）kind 和 type
+reflect.Value类型提供了Kind()方法，获取变量实际的种类。
+reflect.Value类型提供了Type()方法，获取变量实际的类型。
+var y []int
+v := reflect.ValueOf(y)
+fmt.Println(v.Type()) // 输出：[]int
+fmt.Println(v.Kind()) // 输出：slice（reflect.Slice）
+type 会展示更加详细的信息
+
+->
+如果一个变量是reflect.Value类型，则可以通过SetInt,SetFloat,SetString等方法修改变量的值。
+但是reflect.Value必须是指针类型，否则无法修改原变量的值。
+并且->reflect.Value.Set 只能设置相同类型的值，否则会在运行时触发 panic
+可以通过Canset方法判断reflect.Value是否可以修改。
+
+：***
+如果变量本身是结构体：即 type 是 struct的话（不能传入指针->NumField内部判断传入值必须为Struct类型 & 用 Elem() 解引用）：
+reflect.Value类型提供了NumField()函数，用来返回结构体成员数量。
+rvalue := reflect.ValueOf(itf)
+	for i := 0; i < rvalue.NumField(); i++ {
+	...
+：
+另外如果reflect.Value为指针类型，需要通过Elem()解引用方可使用其方法。
+if rptrvalue.Elem().CanSet() {
+	rptrvalue.Elem().SetFloat(131.4)
+}
+
+非指针类型：类似于通过值传递进行拷贝，无法修改原始变量。
+指针类型：类似于引用或指针传递，可以通过反射间接修改原始变量。
+
+->
+Elem()相当于C++编程中解引用的*
+不是指针时调用 .Elem() 会 panic
+
+
+
+2）普通变量和 reflect.Value
+普通类型：静态编程，编译期类型确定，性能更高，代码更可读。
+reflect.Value：动态编程，类型在运行时处理。适用于你事先不知道变量类型的场景，如处理任意结构体、动态调用方法等。
+
+
+
+3）reflect.Value 的赋值和初始化
+| 作用    | `reflect.ValueOf(100)` | `SetInt(100)`                            |
+| ----- | ---------------------- | ---------------------------------------- |
+| 类型    | 构造 `reflect.Value`     | 修改现有 `reflect.Value` 的值                  |
+| 是否可修改 | 否（默认是不可修改的）            | 只能在“可设置的” `Value` 上调用                    |
+| 典型用法  | 用于获取值、判断类型等            | 用于反射修改结构体/变量值                            |
+| 示例    | `reflect.ValueOf(100)` | `reflect.ValueOf(&x).Elem().SetInt(100)` |
+
+
+
+4）变量声明
+| 用途          | 示例                               | 说明                         |
+| ----------- | -------------------------------- | -------------------------- |
+| **定义类型**    | `type IOInter interface { ... }` | 使用 `type` 定义一个新类型（接口或结构体）  |
+| **变量声明与赋值** | `var io IOInter = d`             | 声明一个接口类型的变量 `io`，并用 `d` 赋值 |
+
+
+
+5）reflect.Value 为结构体下的成员变量修改
+->辨析 kind 和 type 之间返回值种类的区别
+type MyInt int
+
+var x MyInt = 5
+v := reflect.ValueOf(x)
+
+fmt.Println(v.Type()) // 输出：main.MyInt
+fmt.Println(v.Kind()) // 输出：int，全称其实是 reflect.Int
+->int 和 reflect.Int
+reflect.Int 是枚举常量，值是 1（int 类型的常量）
+
+->什么情况下可以修改成员变量：
+if rvalue.Elem().Field(1).CanSet() { // 如果是直接传入了结构体，则不用声明 Elem()
+		rvalue.Elem().Field(1).SetInt(100)
+
+Field(i) 代表了成员变量的访问顺序->
+要么成员变量声明首字母大写；要么结构体提供了相关接口去修改
+否则无法使用 Set 直接修改
+
+ 
+
+6）调用结构体的方法
+-> Method()
+反射中的 Method() 方法会按顺序返回结构体的所有方法，包括指针接收者方法和值接收者方法。
+如果结构体是通过指针传递的，指针接收者方法能够在反射中成功调用并修改原始结构体的字段。
+指针接收者方法和值接收者方法都会算在方法列表中
+* 但使用值接收者方法修改结构体字段时，只会修改结构体副本，而不会影响原始结构体。*
+指针接收者方法和值接收者方法都会算在方法列表中，但使用值接收者方法修改结构体字段时，只会修改结构体副本，而不会影响原始结构体。
+->MethodName("val")
+
+->关于传参
+.Call() 方法的函数签名：
+func (v Value) Call(in []Value) []Value
+为什么会传入切片而不是单独的参数呢：
+Go 的反射机制并不知道被调用方法的参数类型和数量，因此它要求提供一个切片来传递这些参数。
+reflect.Value 就是 Go 中用于表示反射值的基本类型。所有的反射操作都通过 reflect.Value 来进行。
+->
+rvalue := reflect.ValueOf(itf)
+params := []reflect.Value{reflect.ValueOf("Rolin")}
+rvalue.MethodByName("SetName").Call(params)
+对这个结构体所有的操作都需要通过 reflect.Value 封装，因为这是表示反射值的基本类型
+所以对这个结构体方法进行调用的时候，传参必须是：1.切片 2.reflect.Value 封装
+
+使用反射调用结构体的方法时，反射方法（例如 MethodByName）返回的是一个 reflect.Value 对象。
+由于反射方法是在运行时动态执行的，因此需要用 reflect.Value 来封装方法参数，以便反射机制能够正确处理这些参数。
