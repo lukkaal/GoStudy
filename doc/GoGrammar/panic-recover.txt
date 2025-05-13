@@ -1,0 +1,37 @@
+1）panic传播机制
+panic 一旦被触发，当前函数（Funlv1()）立即中断，跳过后续的代码
+panic 会向上传播，触发调用栈（嵌套，函数运行时会有栈帧）中的每个 defer 语句：
+但如果没有 recover()，程序最终会终止，不会继续执行 Funlv2() 之后的代码。
+->相当于 defer 是作为该函数的捕获机制（也是函数，使用 recover()）存在的
+defer func() {
+	if err := recover(); err != nil {
+	...
+确保程序在遇到 panic 时能够继续执行，而不是完全终止，那么 在每个函数中使用 defer 和 recover() 是一种有效的做法。
+func Funlv1Safe() {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println("Funlv1 catch panic , err is ", err)
+		}
+		log.Println("Funlv1 exit ...")
+	}()
+	log.Println("Funlv1 begin")
+	panic("sorry, Funlv1 panic")
+	log.Println("Funlv1 end")
+}
+
+func Funlv2Safe() {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println("Funlv2 catch panic , err is ", err)
+		}
+		log.Println("Funlv2 exit ...")
+	}()
+	log.Println("Funlv2 begin")
+	Funlv1Safe()
+	panic("sorry, Funlv1 panic")
+	log.Println("Funlv2 end")
+}
+
+func main() {
+	Funlv2Safe()
+}
