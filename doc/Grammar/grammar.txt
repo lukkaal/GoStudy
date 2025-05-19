@@ -244,3 +244,28 @@ func GetFlyType(bird Bird) {
 两个结构体的指针类型都实现了 Fly() 方法，所以都实现了 Bird 接口 -> 也因此可以把 *Plane 或 *Butterfly 赋值给类型为 Bird 的变量
 
 
+
+15）type 关键字
+type ListType struct {
+	EqualFunc func(a, b *Gobj) bool
+}
+定义新类型（定义而非别名）
+->
+type MyInt = int -> 类型别名
+等价于  cpp 的 typedef，MyInt 和 int 是完全相同的类型。
+
+
+
+16）关键字
+| 特性      | `var`            | `type`           |
+| ------- | ---------------- | ---------------- |
+| 用途      | 定义变量             | 定义类型或别名          |
+| 是否引入新类型 | 否                | 是（或创建类型别名）       |
+| 示例      | `var x int = 10` | `type MyInt int` |
+| 自动推导    | ✅ 支持             | ❌ 不支持            |
+| 是否可赋初值  |                  |                  |
+var name string = "Alice"
+var age = 30        // 自动推导为 int
+
+type MyInt int               // 新类型，和 int 不兼容
+type StringAlias = string    // 类型别名，完全等价
