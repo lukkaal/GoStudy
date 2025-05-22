@@ -1,0 +1,54 @@
+1）redisClient *c = (redisClient *)privdata;
+因为 readQueryFromClient 函数签名是：
+void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask);
+不是新建对象，而是 从事件系统传入的 void * 参数中“恢复出”
+之前注册进去的 redisClient * 指针，以便在回调中继续使用该连接的上下文数据。
+
+->所以后面才使用到了 c->querybuf = sdscatlen(c->querybuf, buf, nread);
+把客户端刚刚通过 read(fd) 读到的 nread 个字节追加到 c->querybuf 中
+追加的原因也在于此：是同一个 redisClient* 
+
+
+2）对字符串进行处理
+
+
+客户端发送： "SET mykey myval\nGET mykey\n"
+
+              ↓
+read() 读入 buf → 追加到 querybuf
+              ↓
+检测 querybuf 是否有完整的一行（找 \n）
+              ↓
+    有？→ 拆分成 argc + argv[]
+              ↓
+        转成 RedisObject[]，执行 processCommand()
+              ↓
+        如果有剩余命令，goto again
+
+
+
+3）redis 的事件循环
+epoll_wait 获取到 file_event后执行
+然后check时间戳后执行 time_event
+
+
+
+4）redis通信协议
+*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$5\r\nluka\r\n
+| 步骤 | 操作                      | 说明         |
+| -- | ----------------------- | ---------- |
+| 1  | 读出 `*3` → `bulkNum = 3` | 表示有 3 个参数  |
+| 2  | 读出 `$3` → `bulkLen = 3` | 第一个参数长度是 3 |
+| 3  | 继续读 3 个字节：`SET`         | 参数1完成      |
+| 4  | 读出 `$4` → `bulkLen = 4` | 第二个参数长度是 4 |
+| 5  | 继续读 4 个字节：`name`        | 参数2完成      |
+| 6  | 读出 `$5` → `bulkLen = 5` | 第三个参数长度是 5 |
+| 7  | 继续读 5 个字节：`luka`        | 参数3完成      |
+
+┌──────────────┬────────┬──────────────┐
+│ 字段         │ 例子   │ 含义         │
+├──────────────┼────────┼──────────────┤
+│ bulkNum      │ 3      │ 参数总个数   │ ← 来自 *3\r\n
+│ bulkLen      │ 5      │ 当前参数长度 │ ← 来自 $5\r\n
+│ queryBuf     │ 字节流 │ 原始命令内容 │
+└──────────────┴────────┴──────────────┘
