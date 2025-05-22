@@ -25,6 +25,11 @@ const (
 type FileProc func(loop *AeLoop, fd int, extra interface{})
 type TimeProc func(loop *AeLoop, fd int, extra interface{})
 
+/*
+godis.go
+client := extra.(*GodisClient) // 接口的 assert
+*/
+
 type AeFileEvent struct {
 	fd    int
 	mask  FeType
@@ -74,7 +79,7 @@ func (loop *AeLoop) getEpollMask(fd int) uint32 {
 	return ev
 }
 
-func (loop *AeLoop) addFileEvent(fd int, mask FeType, proc FileProc, extra interface{}) {
+func (loop *AeLoop) AddFileEvent(fd int, mask FeType, proc FileProc, extra interface{}) {
 	// epoll_ctl 添加事件
 	ev := loop.getEpollMask(fd)
 	// 如果已经注册了该事件且事件类型相同
