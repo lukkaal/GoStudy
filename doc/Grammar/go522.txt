@@ -1,0 +1,52 @@
+1）匿名嵌入
+type List struct {
+    ListType  // 匿名嵌入：字段名就是类型名
+    head *Node
+    tail *Node
+}
+组合优于继承（composition over inheritance）
+嵌入方式使得 Go 支持“扁平化组合”——多个 struct 嵌入到一个对象里
+像继承一样调用其方法，但语义上仍是组合，不存在 C++/Java 的继承链复杂性。
+
+| 特性    | Go                     | C++                           |
+| ----- | ---------------------- | ----------------------------- |
+| 继承    | 通过匿名字段嵌入实现“组合+继承”      | 显式 `: public Base` 继承         |
+| 字段顺序  | 名字在前、类型在后（`name Type`） | 类型在前、名字在后（`Type name`）        |
+| 可见性控制 | 通过字段首字母大小写决定是否导出       | `public/private/protected` 修饰 |
+| 多继承   | 不支持                    | 支持多继承                         |
+| 成员访问  | 直接访问嵌入字段的方法或属性         | 需要 `base.method()` 或 `this->` |
+
+cpp：
+struct ListType {
+    // 假设有一些字段或方法
+};
+
+struct Node;
+
+struct List : public ListType {
+    Node* head;
+    Node* tail;
+    int length;
+};
+
+
+
+2）GC
+Go 中，只要没有任何变量、结构体或协程持有某个对象的引用，
+它就会被 GC 自动释放，不需要也不能手动 free。
+->是自动回收
+以下是模拟: 手动控制逻辑释放，GC 负责真正释放内存。
+if o.refCount == 0 {         // 2. 如果引用计数为 0
+		// let GC do the work   // 3. 留给 Go 的垃圾回收器处理
+		o.Val_ = nil            // 4. 主动清空值，帮助 GC 更快回收内存
+	}
+
+
+
+3）
+type ListType struct {
+	EqualFunc func(a, b *Gobj) bool
+}
+EqualFunc 是一个字段，字段的类型是“函数类型”
+访问 .EqualFunc 会得到一个函数
+对 .EqualFunc(...) 调用，就是调用这个函数
