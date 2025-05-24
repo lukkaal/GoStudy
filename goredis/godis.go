@@ -3,9 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -121,8 +124,11 @@ func expireCommand(c *GodisClient) {
 		//TODO: extract shared.strings
 		c.AddReplyStr("-ERR: wrong type\r\n")
 	}
+	// 计算 expire 时间
 	expire := GetMsTime() + (val.IntVal() * 1000)
+	// 使用 expire 作为 val 创建对象
 	expObj := CreateFromInt(expire)
+	// 将过期的 key 放入到 expire 数据库当中
 	server.db.expire.Set(key, expObj)
 	expObj.DecrRefCount()
 	c.AddReplyStr("+OK\r\n")
@@ -170,7 +176,7 @@ func ProcessCommand(c *GodisClient) {
 	resetClient(c)
 }
 
-// 具体的 CommandProc 实现
+// 具体的 CommandProc 实现，引用清零
 func freeArgs(client *GodisClient) {
 	for _, v := range client.args {
 		v.DecrRefCount()
@@ -412,4 +418,127 @@ func SendReplyToClient(loop *AeLoop, fd int, extra interface{}) {
 		client.sentLen = 0
 		loop.RemoveFileEvent(fd, AE_WRITABLE)
 	}
+}
+
+func AcceptHandler(loop *AeLoop, fd int, extra interface{}) {
+	cfd, _, err := unix.Accept(fd)
+	if err != nil {
+		log.Printf("accept err: %v\n", err)
+		return
+	}
+	client := CreateClient(cfd)
+	//TODO: check max clients limit
+	server.clients[cfd] = client
+	server.aeLoop.AddFileEvent(cfd, AE_READABLE, ReadQueryFromClient, client)
+	log.Printf("accept client, fd: %v\n", cfd)
+}
+
+const EXPIRE_CHECK_COUNT int = 100
+
+func CreateClient(fd int) *GodisClient {
+	var client GodisClient
+	client.fd = fd
+	client.db = server.db
+	client.queryBuf = make([]byte, GODIS_IO_BUF)
+	client.reply = ListCreate(ListType{EqualFunc: GStrEqual})
+	return &client
+}
+
+// 判断两个 Gobj 是否类型为字符串（GSTR）
+func GStrEqual(a, b *Gobj) bool {
+	if a.Type_ != GSTR || b.Type_ != GSTR {
+		return false
+	}
+	return a.StrVal() == b.StrVal()
+}
+
+// 使用 FNV-1a 64bit 哈希函数对字符串内容进行哈希
+func GStrHash(key *Gobj) int64 {
+	if key.Type_ != GSTR {
+		return 0
+	}
+	hash := fnv.New64()
+	hash.Write([]byte(key.StrVal()))
+	return int64(hash.Sum64())
+}
+
+// 懒惰过期策略（lazy expiration）
+func ServerCron(loop *AeLoop, id int, extra interface{}) {
+	for i := 0; i < EXPIRE_CHECK_COUNT; i++ {
+		entry := server.db.expire.RandomGet()
+		if entry == nil {
+			break
+		}
+		if entry.Val.IntVal() < time.Now().Unix() {
+			server.db.data.Delete(entry.Key)
+			server.db.expire.Delete(entry.Key)
+		}
+	}
+}
+
+// server
+const BACKLOG int = 64
+
+func TcpServer(port int) (int, error) {
+	s, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+	if err != nil {
+		log.Printf("init socket err: %v\n", err)
+		return -1, nil
+	}
+	err = unix.SetsockoptInt(s, unix.SOL_SOCKET, unix.SO_REUSEPORT, port)
+	if err != nil {
+		log.Printf("set SO_REUSEPORT err: %v\n", err)
+		unix.Close(s)
+		return -1, nil
+	}
+	var addr unix.SockaddrInet4
+	// golang.syscall will handle htons
+	addr.Port = port
+	// golang will set addr.Addr = any(0)
+	err = unix.Bind(s, &addr)
+	if err != nil {
+		log.Printf("bind addr err: %v\n", err)
+		unix.Close(s)
+		return -1, nil
+	}
+	err = unix.Listen(s, BACKLOG)
+	if err != nil {
+		log.Printf("listen socket err: %v\n", err)
+		unix.Close(s)
+		return -1, nil
+	}
+	return s, nil
+}
+
+func initServer(config *Config) error {
+	server.port = config.Port
+	server.clients = make(map[int]*GodisClient)
+	server.db = &GodisDB{
+		data:   DictCreate(DictType{HashFunc: GStrHash, EqualFunc: GStrEqual}),
+		expire: DictCreate(DictType{HashFunc: GStrHash, EqualFunc: GStrEqual}),
+	}
+	var err error
+	if server.aeLoop, err = AeLoopCreate(); err != nil {
+		return err
+	}
+	server.fd, err = TcpServer(server.port)
+	return err
+}
+
+func main() {
+	path := os.Args[1]
+	config, err := LoadConfig(path)
+	if err != nil {
+		log.Printf("config error: %v\n", err)
+	}
+	err = initServer(config)
+	if err != nil {
+		log.Printf("init server error: %v\n", err)
+	}
+	// eventloop for files and time
+	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
+	// 一开始加进来作为后台任务
+	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
+	log.Println("godis server is up.")
+	server.aeLoop.AeMain()
 }
