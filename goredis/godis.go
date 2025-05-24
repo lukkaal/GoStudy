@@ -385,7 +385,31 @@ func SendReplyToClient(loop *AeLoop, fd int, extra interface{}) {
 		bufLen := len(buf)
 		// sentlen < buflen 上一次没有发完
 		if client.sentLen < bufLen {
-
+			n, err := unix.Write(fd, buf[client.sentLen:])
+			if err != nil {
+				log.Printf("send reply err: %v\n", err)
+				freeClient(client)
+				return
+			}
+			client.sentLen += n
+			log.Printf("send %v bytes to client:%v\n", n, client.fd)
+			/*
+			 此时 head 已经发完了
+			 client.reply 中的每条消息都一次性成功写完 则不break
+			*/
+			if client.sentLen == bufLen {
+				client.reply.DelNode(rep)
+				rep.Val.DecrRefCount()
+				client.sentLen = 0
+			} else {
+				// 说明此时还是没有发完 缓冲区当中没有 bytes 了
+				break
+			}
 		}
+	}
+	//
+	if client.reply.Length() == 0 {
+		client.sentLen = 0
+		loop.RemoveFileEvent(fd, AE_WRITABLE)
 	}
 }
