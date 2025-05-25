@@ -22,30 +22,26 @@
   - 安装工具包：`$GOPATH/bin/`（如 `go install` 安装的 CLI 工具）
 
 ---
-
 ## 项目结构与依赖行为示例
 /home/user/myproject/ ← 当前项目根目录（模块根）
 ├── go.mod ← 模块定义文件，声明依赖
 ├── go.sum ← 依赖版本校验文件
 ├── main.go ← 主程序入口，package main
 ├── service/ ← 自定义包，模块内代码组织
-│ └── service.go
+│   └── service.go
 ├── utils/
-│ └── utils.go
-└── vendor/ (可选) ← 第三方依赖本地副本，使用 go mod vendor 生成
-
-- 每个子目录为一个 package  
-- 同一个模块下的 package 可直接通过相对路径导入  
-- 项目依赖的第三方库会被下载到 `$GOPATH/pkg/mod/`  
-- 通过 `import "github.com/xxx/yyy"` 使用第三方包  
-- 依赖关系自动写入 `go.mod`，完整校验写入 `go.sum`
+│   └── utils.go
+└── vendor/ (可选) ← 第三方依赖本地副本，使用 `go mod vendor` 生成
 
 $GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径
 ├── github.com/gin-gonic/gin@v1.9.1/
 ├── golang.org/x/net@v0.0.0-xxxxxx/
 └── ...
-
-
+- 每个子目录为一个 package  
+- 同一个模块下的 package 可直接通过相对路径导入  
+- 项目依赖的第三方库会被下载到 `$GOPATH/pkg/mod/`  
+- 通过 `import "github.com/xxx/yyy"` 使用第三方包  
+- 依赖关系自动写入 `go.mod`，完整校验写入 `go.sum`
 ---
 
 ## 常用命令说明（简洁版）
