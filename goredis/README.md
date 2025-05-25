@@ -44,7 +44,7 @@ $GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径
 - 项目依赖的第三方库会被下载到 `$GOPATH/pkg/mod/`  
 - 通过 `import "github.com/xxx/yyy"` 使用第三方包  
 - 依赖关系自动写入 `go.mod`，完整校验写入 `go.sum`
-```
+
 ---
 
 ## 常用命令说明（简洁版）
