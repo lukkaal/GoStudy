@@ -93,7 +93,7 @@ $GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径
 
 
 # Goredis
-## 渐进式 Rehash 方法
+## 一、渐进式 Rehash 方法
 **目的**  
 将旧哈希表中的数据逐步迁移到新表，避免一次性 rehash 带来的性能阻塞。
 
@@ -192,7 +192,7 @@ type GodisClient struct {
 }
 ```
 
-## 写事件的非阻塞设计：List 与 reply 队列
+## 二、写事件的非阻塞设计：List 与 reply 队列
 
 对于每一次来自客户端的完整请求（如 `SET mykey hello`），在获取数据库数据（无论成功或失败）后，服务器都会调用 `AddReply`：
 
@@ -271,7 +271,8 @@ func (c *GodisClient) AddReplyStr(str string) {
 ...
 func SendReplyToClient(loop *AeLoop, fd int, extra interface{}) {
 	client := extra.(*GodisClient)
-	log.Printf("SendReplyToClient, reply len:%v\n", client.reply.Length())
+	log.Printf("SendReplyToClient, reply len:%v\n")   
+  client.reply.Length()
 	for client.reply.Length() > 0 {
 		rep := client.reply.First()
 		buf := []byte(rep.Val.StrVal())
@@ -300,4 +301,144 @@ func SendReplyToClient(loop *AeLoop, fd int, extra interface{}) {
 			}
 		}
 	}
+	//
+	if client.reply.Length() == 0 {
+		client.sentLen = 0
+		loop.RemoveFileEvent(fd, AE_WRITABLE)
+	}
+}
+
 ```
+
+## 三、读事件及 RESP 协议
+
+### 客户端状态管理
+
+- `freeClient`：彻底释放客户端资源，关闭连接。
+  - 释放命令参数与回复队列；
+  - 移除读写事件监听；
+  - 从服务器客户端集合中删除；
+  - 关闭文件描述符，完成断开。
+  - 调用时机：出错或客户端发送 `quit` 命令。
+
+- `resetClient`：重置客户端状态，保留连接与回复队列，仅释放命令参数。
+  - 重置命令类型、bulk 状态；
+  - 用于指令处理完成后的复用；
+  - 正常流程：`ProcessCommand -> cmd.proc(c) -> resetClient(c)`。
+
+---
+```go
+func freeClient(client *GodisClient) {
+    freeArgs(client) 
+    delete(server.clients, client.fd)
+    server.aeLoop.RemoveFileEvent(client.fd, AE_READABLE)
+    server.aeLoop.RemoveFileEvent(client.fd, AE_WRITABLE)
+    freeReplyList(client)
+    Close(client.fd)
+}
+
+func resetClient(client *GodisClient) {
+    freeArgs(client)
+    client.cmdTy = COMMAND_UNKNOWN
+    client.bulkLen = 0
+    client.bulkNum = 0
+}
+```
+
+### 协议解析类型
+
+| 函数                | 协议类型                   | 特点                                                                                          |
+|---------------------|----------------------------|-----------------------------------------------------------------------------------------------|
+| `handleInlineBuf`   | **Inline（行内）命令协议** | 命令和参数一整行发送，空格分隔。例如：`SET key value\r\n`                                    |
+| `handleBulkBuf`     | **Bulk（多段）命令协议**   | Redis 使用的 RESP 协议，结构化明确，支持二进制数据。例如：`*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n` |
+
+---
+
+### 协议处理逻辑概述
+
+#### Inline 协议（handleInlineBuf）
+
+```go
+index, err := client.findLineInQuery()
+if index < 0 {
+    return false, err
+}
+```
+
+- 查找 `\r\n`，如果未找到，说明命令未读完，提前返回；
+- 否则继续分割参数，构建 `args` 数组。
+
+---
+
+#### Bulk 协议（handleBulkBuf）
+
+##### 1. 获取参数数量（*N\r\n）
+
+```go
+index, err := client.findLineInQuery()
+if index < 0 {
+    return false, err
+}
+bnum, err := client.getNumInQuery(1, index)
+client.bulkNum = bnum
+```
+
+##### 2. 读取每个 bulk 参数头部（$len\r\n）
+
+```go
+if client.bulkLen == 0 {
+    index, err := client.findLineInQuery()
+    if index < 0 {
+        return false, err // 仍然不完整
+    }
+    if client.queryBuf[0] != '$' {
+        return false, errors.New("expect $ for bulk length")
+    }
+    blen, err := client.getNumInQuery(1, index)
+    ...
+    client.bulkLen = blen
+}
+```
+
+##### 3. 读取 bulk 内容（数据本体）
+
+```go
+if client.queryLen < client.bulkLen + 2 {
+    return false, nil // 内容未完整，等待更多数据
+}
+if client.queryBuf[index] != '\r' || client.queryBuf[index+1] != '\n' {
+    return false, errors.New("expect CRLF for bulk end")
+}
+client.args[len(client.args)-client.bulkNum] = CreateObject(GSTR, string(client.queryBuf[:index]))
+client.queryBuf = client.queryBuf[index+2:]
+client.queryLen -= index + 2
+client.bulkLen = 0
+client.bulkNum -= 1
+```
+
+---
+
+### 中断与继续逻辑
+
+- 外层 `ReadQueryFromClient` 会根据 `false` 返回值决定是否继续等待数据；
+- 协议处理函数只负责判断当前是否接收完整，不进行跳转；
+- 一旦 `args` 填充完成，即进入命令执行阶段；
+  ```go
+  ProcessCommand -> cmd.proc(c)
+  ```
+
+- 数据处理后，调用：
+  - `AddReplyStr`：构造响应；
+  - 注册 `AE_WRITABLE` 写事件；
+  - 将响应加入 `client.reply` 的 `List` 队列。
+
+---
+
+### 总结流程图（文字版）
+
+1. 接收请求 → 判断协议类型（Inline 或 Bulk）
+2. 解析命令参数（支持多次中断恢复）
+3. 构建 Gobj 并存入 args
+4. 命令执行，得到结果
+5. AddReply，加入写队列，注册写事件
+6. 等待事件驱动发送回复
