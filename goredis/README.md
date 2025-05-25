@@ -89,3 +89,79 @@ $GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径
 6. `go.mod` 声明模块名、require 的依赖版本、replace 的本地路径替代项  
 7. `go.sum` 记录所有依赖模块的哈希校验值，保障依赖一致与安全  
 8. `go build`、`go test`、`go mod tidy` 等命令自动更新 `go.sum` 文件
+
+
+
+# Goredis
+## 渐进式 Rehash 方法
+**目的**  
+将旧哈希表中的数据逐步迁移到新表，避免一次性 rehash 带来的性能阻塞。
+
+**关键机制**  
+1. 字典结构有两个哈希表：`hts[0]`（当前表）和 `hts[1]`（新表）。  
+2. 扩容时调用 `expandIfNeeded()` 触发 `expand(size)`，分配 `hts[1]` 并将 `rehashidx` 设为 0，标记开始渐进式迁移。  
+3. 每次对字典进行操作（插入、查找、删除）时，会触发一步 `rehashStep()`，将 `hts[0].table[rehashidx]` 中的桶迁移到 `hts[1]`。  
+4. 当 `hts[0]` 所有桶都迁移完毕（`rehashidx >= hts[0].size`），交换两个哈希表，并重置 `rehashidx = -1`。
+
+**优点**  
+将 rehash 分摊到日常操作中，避免长时间阻塞。
+
+> 在进行插入、查找、删除等日常操作时，  
+> 应首先判断字典是否正在进行 rehash（即 `dict.isRehashing() == true`），  
+> 若是，则执行一步 `rehashStep()`，迁移当前 `rehashidx` 位置上的桶内容，  
+> 从而将 rehash 操作与日常操作交错执行，实现渐进式迁移。
+
+**rehash 期间的操作规则**  
+- **查找（Find）**：同时查询 `hts[0]` 和 `hts[1]`，确保命中旧数据或已迁移的数据。  
+- **插入（Add & Set）**：所有新键值对仅插入到 `hts[1]`。  
+- **删除（Delete）**：需要在两个表中查找并删除目标键。  
+- **过期**：本质也是一次删除再插入操作。  
+
+这样设计确保了数据一致性，同时不会阻塞主线程，实现高性能的动态扩容。
+```go
+type Entry struct {
+    Key  *Gobj
+    Val  *Gobj
+    next *Entry
+}
+
+type DictType struct {
+    HashFunc  func(key *Gobj) int64
+    EqualFunc func(k1, k2 *Gobj) bool
+}
+
+type Dict struct {
+    DictType
+    hts       [2]*htable
+    rehashidx int64
+}
+...
+func (dict *Dict) rehash(step int) {
+	for step > 0 {
+		if dict.hts[0].used == 0 {
+			dict.hts[0] = dict.hts[1]
+			dict.hts[1] = nil
+			dict.rehashidx = -1
+			return
+		}
+		// find an nonull slot
+		for dict.hts[0].table[dict.rehashidx] == nil {
+			dict.rehashidx += 1
+		}
+		// migrate all keys in this slot
+		entry := dict.hts[0].table[dict.rehashidx]
+		for entry != nil {
+			ne := entry.next
+			idx := dict.HashFunc(entry.Key) & dict.hts[1].mask
+			entry.next = dict.hts[1].table[idx]
+			dict.hts[1].table[idx] = entry
+			dict.hts[0].used -= 1
+			dict.hts[1].used += 1
+			entry = ne
+		}
+		dict.hts[0].table[dict.rehashidx] = nil
+		dict.rehashidx += 1
+		step -= 1
+	}
+}
+```
