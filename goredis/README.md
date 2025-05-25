@@ -165,3 +165,139 @@ func (dict *Dict) rehash(step int) {
 	}
 }
 ```
+
+```go
+type Node struct {
+    Val  *Gobj
+    next *Node
+    prev *Node
+}
+
+type ListType struct {
+    EqualFunc func(a, b *Gobj) bool
+}
+
+type List struct {
+    ListType
+    head   *Node
+    tail   *Node
+    length int
+}
+
+type GodisClient struct {
+    ...
+    args     []*Gobj
+    reply    *List
+    ...
+}
+```
+
+## 写事件的非阻塞设计：List 与 reply 队列
+
+对于每一次来自客户端的完整请求（如 `SET mykey hello`），在获取数据库数据（无论成功或失败）后，服务器都会调用 `AddReply`：
+
+- 将响应结果封装成 `Node` 节点（注意：`Dict` 中的 `Gobj` 和 `List.Node` 中的 `Gobj` 是解耦合的）；
+- 放入 `client.reply` 的 `List` 队列中；
+- 调用 `loop.AddFileEvent(fd, AE_WRITABLE, SendReplyToClient, client)` 注册写事件；
+  - 注册时会检查 `fd` 是否已经注册了 `AE_WRITABLE`，避免重复。
+
+---
+
+**对于 `List` 队列中的每一个 `Node`：**
+
+**情况一：未全部写完**
+
+- 由于内核缓冲区限制，调用 `unix.write(fd, buf[client.sentLen:])` 只写出了部分数据（即 `n < bufLen - sentLen`）；
+- 增加 `client.sentLen`，记录已发送的字节数；
+- **不删除当前回复节点**，保留剩余数据等待下一次发送；
+- 退出发送循环，等待下一次写事件触发，继续发送。
+
+**情况二：全部写完**
+
+- 若 `client.sentLen == bufLen`，说明当前回复内容全部发送完成；
+- 删除当前回复节点，释放资源：
+  ```go
+  client.reply.DelNode(rep)
+  rep.Val.DecrRefCount()
+  ```
+- 重置 `client.sentLen = 0`，为下一条回复准备；
+- 继续发送下一个节点（如果有）。
+
+---
+
+**状态处理总结**
+
+| 情况           | 处理方式                                         | 目的                           |
+|----------------|--------------------------------------------------|--------------------------------|
+| **未全部写完** | 更新 `sentLen`，保留节点，等待下次写事件触发     | 处理短写，保证数据完整性和顺序 |
+| **全部写完**   | 删除节点，清空进度，继续发送下一个               | 清理资源，推进回复队列         |
+
+```go
+type Node struct {
+    Val  *Gobj
+    next *Node
+    prev *Node
+}
+
+type ListType struct {
+    EqualFunc func(a, b *Gobj) bool
+}
+
+type List struct {
+    ListType
+    head   *Node
+    tail   *Node
+    length int
+}
+
+type GodisClient struct {
+    ...
+    args     []*Gobj
+    reply    *List
+    ...
+}
+...
+func (c *GodisClient) AddReply(o *Gobj) {
+	c.reply.Append(o)
+	o.IncrRefCount()
+	server.aeLoop.AddFileEvent(c.fd, AE_WRITABLE, SendReplyToClient, c)
+}
+
+func (c *GodisClient) AddReplyStr(str string) {
+	o := CreateObject(GSTR, str)
+	c.AddReply(o)
+	o.DecrRefCount() // 初始化后有一次ref 这里释放一次
+}
+...
+func SendReplyToClient(loop *AeLoop, fd int, extra interface{}) {
+	client := extra.(*GodisClient)
+	log.Printf("SendReplyToClient, reply len:%v\n", client.reply.Length())
+	for client.reply.Length() > 0 {
+		rep := client.reply.First()
+		buf := []byte(rep.Val.StrVal())
+		bufLen := len(buf)
+		// sentlen < buflen 上一次没有发完
+		if client.sentLen < bufLen {
+			n, err := unix.Write(fd, buf[client.sentLen:])
+			if err != nil {
+				log.Printf("send reply err: %v\n", err)
+				freeClient(client)
+				return
+			}
+			client.sentLen += n
+			log.Printf("send %v bytes to client:%v\n", n, client.fd)
+			/*
+			 此时 head 已经发完了
+			 client.reply 中的每条消息都一次性成功写完 则不break
+			*/
+			if client.sentLen == bufLen {
+				client.reply.DelNode(rep)
+				rep.Val.DecrRefCount()
+				client.sentLen = 0
+			} else {
+				// 说明此时还是没有发完 缓冲区当中没有 bytes 了
+				break
+			}
+		}
+	}
+```
