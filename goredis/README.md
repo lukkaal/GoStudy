@@ -166,32 +166,6 @@ func (dict *Dict) rehash(step int) {
 }
 ```
 
-```go
-type Node struct {
-    Val  *Gobj
-    next *Node
-    prev *Node
-}
-
-type ListType struct {
-    EqualFunc func(a, b *Gobj) bool
-}
-
-type List struct {
-    ListType
-    head   *Node
-    tail   *Node
-    length int
-}
-
-type GodisClient struct {
-    ...
-    args     []*Gobj
-    reply    *List
-    ...
-}
-```
-
 ## 二、写事件的非阻塞设计：List 与 reply 队列
 
 对于每一次来自客户端的完整请求（如 `SET mykey hello`），在获取数据库数据（无论成功或失败）后，服务器都会调用 `AddReply`：
