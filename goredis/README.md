@@ -28,15 +28,15 @@
 ├── go.sum ← 依赖版本校验文件
 ├── main.go ← 主程序入口，package main
 ├── service/ ← 自定义包，模块内代码组织
-│   └── service.go
+│ └── service.go
 ├── utils/
-│   └── utils.go
-└── vendor/ (可选) ← 第三方依赖本地副本，使用 `go mod vendor` 生成
+│ └── utils.go
+└── vendor/ (可选) ← 第三方依赖本地副本，使用 go mod vendor 生成
 
-$GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径
-├── github.com/gin-gonic/gin@v1.9.1/
-├── golang.org/x/net@v0.0.0-xxxxxx/
-└── ...
+$GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径  
+├── github.com/gin-gonic/gin@v1.9.1/  
+├── golang.org/x/net@v0.0.0-xxxxxx/  
+└── ...  
 - 每个子目录为一个 package  
 - 同一个模块下的 package 可直接通过相对路径导入  
 - 项目依赖的第三方库会被下载到 `$GOPATH/pkg/mod/`  
