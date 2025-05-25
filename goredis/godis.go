@@ -193,6 +193,7 @@ func freeReplyList(client *GodisClient) {
 
 func freeClient(client *GodisClient) {
 	freeArgs(client)
+	// deletes the element with the specified key (m[key]) from the map
 	delete(server.clients, client.fd)
 	server.aeLoop.RemoveFileEvent(client.fd, AE_READABLE)
 	server.aeLoop.RemoveFileEvent(client.fd, AE_WRITABLE)

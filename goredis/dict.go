@@ -49,6 +49,14 @@ type Dict struct {
 	rehashidx int64
 }
 
+// 创建 Dict
+func DictCreate(dictType DictType) *Dict {
+	var dict Dict
+	dict.DictType = dictType
+	dict.rehashidx = -1
+	return &dict
+}
+
 func (dict *Dict) isRehashing() bool {
 	return dict.rehashidx != -1
 }
@@ -191,6 +199,7 @@ func (dict *Dict) Add(key, val *Gobj) error {
 }
 
 func (dict *Dict) Set(key, val *Gobj) {
+	// 先看是不是不存在 （使用 Add）
 	err := dict.Add(key, val)
 	if err == nil {
 		return

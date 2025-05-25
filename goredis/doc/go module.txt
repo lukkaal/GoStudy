@@ -1,0 +1,37 @@
+1. go mod（Go Modules）
+定义：Go Modules 是 Go 1.11+ 引入的官方依赖管理系统
+不再依赖 GOPATH 目录结构，每个项目都可以独立管理依赖版本
+build 和 run 所必须的，一个 module 由 go.mod 来管理
+
+2. go package（Go 包）
+定义：Go 的基本组织单元，文件头 package xxx 定义了包名
+支持模块内逻辑的组织与复用，一个模块可以包含多个包
+
+3. GOROOT
+定义：Go 安装目录（包含 Go 编译器、标准库等）
+编译器工具链（go, compile, link）& 标准库源码（GOROOT/src）
+GOROOT/bin
+
+4. GOPATH
+定义：Go 旧版工作区路径，用于存放代码、依赖包、构建产物
+只要有 go.mod 都可以单独成为一个 module，但是通过 go get/ go install得到的 module/ 工具
+都会被放到 /GOPATH 下：
+GOPATH/pkg/mod/：缓存所有拉取的第三方依赖模块
+模块缓存（module cache），无论 go.mod 在哪，同一个 Go 安装环境，都会共用这套缓存。
+GOPATH/bin/：保存 go install 安装的工具（如：golangci-lint）
+
+
+流程：
+拉去 go 后到 /usr/local/go 并添加环境变量
+go get 获取到的是 module，模块之间也会相互依赖( 比如一些第三方库 )
+go install 编译并安装一个可执行的包 
+import 的是 package 和 module，由 go.mod 声明其依赖
+同一个 package 中的函数可以直接跨文件调用，不用 import
+每一个子文件夹是一个 package，整个文件夹是一个 module
+go.mod	声明当前模块名、依赖的所有模块及其版本（require）、替换路径
+go.sum 用于 记录 go.mod 中所有依赖的哈希校验和，确保依赖库未被篡改
+是 安全机制的一部分
+包括直接和间接依赖的版本校验
+被 go build、go test、go mod tidy 自动生成和更新
+
+

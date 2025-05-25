@@ -1,0 +1,254 @@
+type Entry struct {
+	Key  *Gobj
+	Val  *Gobj
+	next *Entry
+}
+type DictType struct {
+	HashFunc  func(key *Gobj) int64
+	EqualFunc func(k1, k2 *Gobj) bool
+}
+type Dict struct {
+	DictType
+	hts       [2]*htable
+	rehashidx int64
+}
+
+一、渐进式 Rehash 方法总结
+目的：将旧哈希表中的数据逐步迁移到新表，避免一次性 rehash 带来的性能阻塞。
+
+关键机制：
+字典结构有两个哈希表：hts[0]（当前表）和 hts[1]（新表）。
+扩容时调用 expandIfNeeded() 触发 expand(size)，分配 hts[1]，并将 rehashidx 设为 0，标记开始渐进式迁移。
+每次对字典进行操作（如插入、查找、删除）时，会触发一步 rehashStep()，将 hts[0].table[rehashidx] 中的桶迁移到 hts[1]。
+当 hts[0] 所有桶都迁移完毕（rehashidx >= hts[0].size），交换两个哈希表，并重置 rehashidx = -1。
+	
+优点：将 rehash 分摊到日常操作中，避免长时间阻塞。
+
+在进行插入、查找、删除等日常操作时，应首先判断字典是否正在进行 rehash（即 dict.isRehashing() == true），若是，则执行一步 rehashStep()，迁移当前 rehashidx 位置上的桶内容，从而将 rehash 操作与日常操作交错执行，实现渐进式迁移。
+
+在 rehash 过程中，操作行为需同时兼顾两个哈希表：
+查找（Find）：必须同时查询 hts[0] 和 hts[1]，确保命中旧数据或已迁移的数据；
+插入（Add & Set）：所有新键值对仅插入到 hts[1]；
+删除（Delete）：需在两个表中查找并删除目标键。
+expire 的本质其实也是删除和插入
+这样设计确保了数据一致性，同时不会阻塞主线程，实现了高性能下的动态扩容。
+
+
+
+
+二、写事件的非阻塞设计 List 与 reply 队列
+
+type Node struct {
+	Val  *Gobj
+	next *Node
+	prev *Node
+}
+type ListType struct {
+	EqualFunc func(a, b *Gobj) bool
+}
+type List struct {
+	ListType
+	head   *Node
+	tail   *Node
+	length int
+}
+
+
+type GodisClient struct {
+	...
+	args     []*Gobj
+	reply    *List
+	...
+}
+
+对于每一次来自客户端的完整请求 (SET mykey hello)
+在获取数据库数据（无论成功或失败）后，服务器都会调用 AddReply：
+将响应结果封装成 Node 节点（Dict 中的 Gobj 和 List - Node 中的 Gobj 是解耦合的）
+放入 client.reply 的 List 队列中；
+调用 loop.AddFileEvent(fd, AE_WRITABLE, SendReplyToClient, client) 注册写事件。
+注册时会检查 fd 是否已经注册了 AE_WRITABLE，避免重复。
+
+对于 List 队列中的每一个 Node：
+未全部写完（内核缓冲区位置有限）
+unix.write(fd, buf[client.sentLen:]) 调用只写出了部分数据，n < bufLen - sentLen
+增加 client.sentLen，记录已发送的字节数。
+不删除当前回复节点，保留剩余数据等待下一次发送。
+退出发送循环，等待下一次写事件触发继续发送。
+
+全部写完
+现象：client.sentLen == bufLen，说明当前回复内容全部发送完成。
+删除当前回复节点，释放资源。
+client.reply.DelNode(rep) -> rep.Val.DecrRefCount()
+重置 client.sentLen 为 0，为下一条回复准备。
+继续发送下一个节点（如果有）
+| 情况        | 处理方式                      | 目的              |
+| --------- | ------------------------- | --------------- |
+| **未全部写完** | 更新 `sentLen`，保留节点，等待下次写事件 | 处理短写，保证数据完整性和顺序 |
+| **全部写完**  | 删除节点，清空进度，继续发送下一个         | 清理资源，推进回复队列     |
+
+
+
+三、读事件及 RESP 协议
+freeClient 函数用于彻底释放客户端资源，关闭连接。它会释放客户端命令参数和回复队列，移除事件监听，从服务器客户端集合中删除该客户端，并关闭文件描述符，完成客户端的完全清理和断开。
+出错或者客户端发送quitif cmdStr == "quit"
+resetClient 函数则用于重置客户端的状态，保留连接和回复队列，仅释放命令参数，并将命令类型、批量读取状态重置为初始值，方便客户端继续复用，不关闭连接。
+正常情况下执行完成一条指令后ProcessCommand  -> cmd.proc(c) resetClient(c)
+func freeClient(client *GodisClient) {
+	freeArgs(client) 
+	delete(server.clients, client.fd)
+	server.aeLoop.RemoveFileEvent(client.fd, AE_READABLE)
+	server.aeLoop.RemoveFileEvent(client.fd, AE_WRITABLE)
+	freeReplyList(client)
+	Close(client.fd)
+}
+
+func resetClient(client *GodisClient) {
+	freeArgs(client)
+	client.cmdTy = COMMAND_UNKNOWN
+	client.bulkLen = 0
+	client.bulkNum = 0
+}
+
+
+| 函数                | 协议类型               | 特点                                                                                        |
+| ----------------- | ------------------ | ----------------------------------------------------------------------------------------- |
+| `handleInlineBuf` | **Inline（行内）命令协议** | 命令和参数一整行发送，空格分隔。例如：`SET key value\r\n`                                                        |
+| `handleBulkBuf`   | **Bulk（多段）命令协议**   | Redis 使用的 RESP 协议，多行结构，结构化明确，支持二进制数据。例如：`*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n` |
+
+break的逻辑
+
+handleInlineBuf
+index, err := client.findLineInQuery()
+if index < 0 {
+	return false, err
+}
+Inline 格式是一次性读取，并且以 \r\n 结尾的
+如果当前缓冲区中 没有找到完整一行命令（\r\n），就提前返回 false，表示 命令还没读完，调用方应继续等待客户端输入；
+否则继续处理命令，分割参数，构建 args 数组。
+
+
+handleBulkBuf
+读取参数个数（第一行 *N\r\n）
+逐个读取 bulk 参数（每个 $len\r\n内容\r\n）
+
+RESP 协议处理代码
+findLineInQuery() 寻找 \r\n
+getNumInQuery(1, index) 获取数字
+均包含了边界处理的逻辑
+
+分为有无 bulkNum 的情况，有的话说明因为没有完整命令已经 break 过一次，没有则应当从 queryBuf 获取 bulkNum：
+循环：
+a. 读取 bulk 长度（如 $3\r\n）
+for client.bulkNum > 0
+if client.bulkLen == 0 {
+    index, err := client.findLineInQuery()
+    if index < 0 {
+        return false, err // 不够一行，等数据
+    }
+    if client.queryBuf[0] != '$' {
+        return false, errors.New("expect $ for bulk length")
+    }
+    blen, err := client.getNumInQuery(1, index)
+    ...
+    client.bulkLen = blen
+}
+
+b. 读取 bulk 内容（如 SET\r\n）
+if client.queryLen < client.bulkLen+2 {
+    return false, nil // bulk 内容不完整，继续等
+}
+if client.queryBuf[index] != '\r' || client.queryBuf[index+1] != '\n' {
+    return false, errors.New("expect CRLF for bulk end")
+}
+client.args[len(client.args)-client.bulkNum] = CreateObject(GSTR, string(client.queryBuf[:index]))
+client.queryBuf = client.queryBuf[index+2:]
+client.queryLen -= index + 2
+client.bulkLen = 0
+client.bulkNum -= 1
+
+中断逻辑：外层的 ReadQueryFromClient 会有 break 逻辑，这里只需要 bool 值设为 false
+1. 读取参数数量（开头的 *N\r\n）：
+index, err := client.findLineInQuery()
+if index < 0 {
+    return false, err //  没接收完整，等待更多数据
+}
+bnum, err := client.getNumInQuery(1, index)
+2. 读取每个 bulk 长度：
+if client.bulkLen == 0 {
+    index, err := client.findLineInQuery()
+    if index < 0 {
+        return false, err //  仍然没接收到完整头部
+    }
+    blen, err := client.getNumInQuery(1, index)
+    ...
+    client.bulkLen = blen
+}
+
+3. 读取 bulk 数据本体：
+if client.queryLen < client.bulkLen + 2 {
+    return false, nil //  数据长度不够，继续接收
+}
+
+最终都会打包成 CreateObject(GSTR, string(client.queryBuf[:index]))
+*Gobj 放入到 []args 当中
+然后映射对应的执行函数处理数据库并得到响应：AddReplyStr，注册写事件并加入到 List 队列
+ 
+
+四、单线程 EventLoop 模型
+AcceptHandler -> 建立连接后封装 *GodisClient 对象，传入维护的 Clients队列 （[]*GodisClient）
+对于FileEvent来说有两次注册：AddFileEvent 读事件(epoll_ctl 内核态+ map[int] *aeFileEvent 用户态)注册事件
+对于TimeEvent来说初始化 aeTimeEvent 后设置 when (触发事件)，在 [] *aeTimeEvent 中注册即可 头插法
+
+Aewait 获取返回的 FileEvent 的文件描述符，通过遍历 *文件描述符 & 事件类型* 后在 map[int] *aeFileEvent 中查询对应事件后放入队列 []*aeFileEvent
+[]*aeTimeEvent 则遍历触发时间 when，将需要触发的事件添加入队列
+
+aeFileEvent->调用 aeFileEvent->proc(*,  fd, extra)
+aeTimeEvent->调用前查看 mask 是否一次性清除; 调用后重新设置触发时间 += interval
+
+
+随机清理，ServerCron 定期执行，从过期字典中随机抽取若干键，若发现已过期则将其从主数据和过期字典中删除。(目前是唯一的TimeEvent)
+func ServerCron(loop *AeLoop, id int, extra interface{}) {
+	for i := 0; i < EXPIRE_CHECK_COUNT; i++ {
+		entry := server.db.expire.RandomGet()
+		if entry == nil {
+			break
+		}
+		if entry.Val.IntVal() < time.Now().Unix() {
+			server.db.data.Delete(entry.Key)
+			server.db.expire.Delete(entry.Key)
+		}
+	}
+}
+
+总体的单线程模型
+func main() {
+	...
+	// eventloop for files and time
+	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
+	// 一开始加进来作为后台任务
+	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil) 
+	log.Println("godis server is up.")
+	server.aeLoop.AeMain()
+}
+
+
+五、关于 *Gobj 的 reference int64
+ref 其实是一个可视化的tag，内存管理 go 会自动进行释放
+对于Dict而言：
+从CreateObj 到存入 args[] 会 ref = 1，之后对 db 的操作会改变其中的值(GET 不会)
+只要 *Gobj 存入了 Dict 之后，ref 就会为 1	
+但是最后客户端在 freeclient/ resetclient 时会 freeargs() 将所有的 ref 进行 decrease 
+
+对于 Reply 来说
+List 和 Dict 之间的 *Gobj 是解耦合的，是从数据库中取值后重新封装的
+从 CreateObj 初始化 ref = 1
+AddReply 将 *Gobj 封装成 Node 后会 ref increase，AddReplyStr 中又会释放一次，
+保证 Node 被删除之前 *Gobj 仅有一次引用在 List
+发送完成后释放 Node时候删除头结点，并且
+rep := client.reply.First()
+...
+if client.sentLen == bufLen {
+	client.reply.DelNode(rep)
+	rep.Val.DecrRefCount()
+	client.sentLen = 0
+...
