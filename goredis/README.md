@@ -370,8 +370,16 @@ if index < 0 {
 
 ---
 
-#### Bulk 协议（handleBulkBuf）
-
+#### Bulk 协议（handleBulkBuf）以及中断逻辑
+```
+RESP 协议处理代码
+findLineInQuery() 寻找 \r\n
+getNumInQuery(1, index) 获取数字
+均包含了边界处理的逻辑
+分为有无 bulkNum 的情况:
+有的话说明因为没有完整命令已经 break 过一次
+没有则应当从 queryBuf 获取 bulkNum：
+```
 ##### 1. 获取参数数量（*N\r\n）
 
 ```go
@@ -383,7 +391,7 @@ bnum, err := client.getNumInQuery(1, index)
 client.bulkNum = bnum
 ```
 
-##### 2. 读取每个 bulk 参数头部（$len\r\n）
+##### 2. 读取每个 bulk 长度（$len\r\n）
 
 ```go
 if client.bulkLen == 0 {
@@ -418,7 +426,7 @@ client.bulkNum -= 1
 
 ---
 
-### 中断与继续逻辑
+### 中断与继续
 
 - 外层 `ReadQueryFromClient` 会根据 `false` 返回值决定是否继续等待数据；
 - 协议处理函数只负责判断当前是否接收完整，不进行跳转；
@@ -442,3 +450,87 @@ client.bulkNum -= 1
 4. 命令执行，得到结果
 5. AddReply，加入写队列，注册写事件
 6. 等待事件驱动发送回复
+
+## 四、单线程 EventLoop 模型
+
+- **连接建立：**  
+  `AcceptHandler` 负责建立连接，封装 `*GodisClient` 对象，添加到维护的 `Clients` 队列（`[]*GodisClient`）。
+
+- **事件注册：**  
+  - 对于 **FileEvent**，有两次注册：  
+    调用 `AddFileEvent` 注册读事件（内核态调用 `epoll_ctl`，用户态维护 `map[int]*aeFileEvent`）。  
+  - 对于 **TimeEvent**，初始化 `aeTimeEvent` 并设置触发时间 `when`，采用头插法加入 `[]*aeTimeEvent`。
+
+- **事件获取与调度：**  
+  - `AeWait` 获取返回的文件描述符和事件类型，遍历后通过 `map[int]*aeFileEvent` 查询对应事件，放入事件队列 `[]*aeFileEvent`。  
+  - 遍历 `[]*aeTimeEvent`，将满足触发条件的时间事件加入队列。
+
+- **事件执行：**  
+  - `aeFileEvent` 调用其 `proc(*, fd, extra)` 函数处理。  
+  - `aeTimeEvent` 调用前检查 `mask` 是否需要一次性清除；调用后重新设置触发时间（`+= interval`）。
+
+---
+
+### 随机过期清理（ServerCron）
+
+- 定期从过期字典随机抽取若干键，检查是否过期。  
+- 发现过期则从主数据和过期字典中删除。  
+- 这是当前唯一的 `TimeEvent`。
+
+```go
+func ServerCron(loop *AeLoop, id int, extra interface{}) {
+	for i := 0; i < EXPIRE_CHECK_COUNT; i++ {
+		entry := server.db.expire.RandomGet()
+		if entry == nil {
+			break
+		}
+		if entry.Val.IntVal() < time.Now().Unix() {
+			server.db.data.Delete(entry.Key)
+			server.db.expire.Delete(entry.Key)
+		}
+	}
+}
+```
+### 总体单线程模型流程
+- 单线程	所有操作在同一线程完成，避免锁竞争，依赖事件循环实现高并发。
+- 非阻塞 I/O	通过 epoll 实现多路复用，文件事件与定时事件统一调度，减少上下文切换。
+```go
+func main() {
+	...
+	// 文件事件注册，监听可读事件，处理新连接
+	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
+
+	// 时间事件注册，作为后台定时任务执行过期清理
+	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil) 
+
+	log.Println("godis server is up.")
+	// 启动事件循环主程序
+	server.aeLoop.AeMain()
+}
+```
+### 五、关于 *Gobj 的 reference int64
+
+- **ref 概念：**  
+  `ref` 实际是一个可视化的标记，内存管理由 Go 语言自动完成释放。
+
+- **对于 Dict 来说：**  
+  - 从 `CreateObj` 到存入 `args[]` 时，`ref = 1`。  
+  - 后续对数据库的写操作会改变其中的值（GET 操作不会）。  
+  - 一旦 `*Gobj` 存入 Dict，`ref` 保持为 1。  
+  - 客户端在 `freeclient` 或 `resetclient` 时，会调用 `freeargs()`，对所有 `ref` 执行递减。
+
+- **对于 Reply 来说：**  
+  - `List` 与 `Dict` 中的 `*Gobj` 是解耦的，Reply 中的对象是从数据库取值后重新封装的。  
+  - `CreateObj` 初始化时，`ref = 1`。  
+  - `AddReply` 将 `*Gobj` 封装成节点（Node）时会增加引用计数；而 `AddReplyStr` 会相应释放一次，确保节点删除前，`*Gobj` 仅有一次引用存在于 `List` 中。  
+  - 发送完成后，释放节点时，会删除头结点并递减引用计数：
+
+```go
+rep := client.reply.First()
+...
+if client.sentLen == bufLen {
+	client.reply.DelNode(rep)
+	rep.Val.DecrRefCount()
+	client.sentLen = 0
+}
+```
