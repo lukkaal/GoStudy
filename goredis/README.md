@@ -23,20 +23,20 @@
 
 ---
 ## 项目结构与依赖行为示例
-/home/user/myproject/ ← 当前项目根目录（模块根）
-├── go.mod ← 模块定义文件，声明依赖
-├── go.sum ← 依赖版本校验文件
-├── main.go ← 主程序入口，package main
-├── service/ ← 自定义包，模块内代码组织
-│ └── service.go
-├── utils/
-│ └── utils.go
-└── vendor/ (可选) ← 第三方依赖本地副本，使用 go mod vendor 生成
+/home/user/myproject/ ← 当前项目根目录（模块根）  
+- go.mod  
+- go.sum  
+- main.go  
+- service/  
+  - service.go  
+- utils/  
+  - utils.go  
+- vendor/ (可选) ← 使用 `go mod vendor` 生成  
 
-$GOPATH/pkg/mod/ ← 所有下载的第三方依赖模块统一缓存路径  
-├── github.com/gin-gonic/gin@v1.9.1/  
-├── golang.org/x/net@v0.0.0-xxxxxx/  
-└── ...  
+$GOPATH/pkg/mod/  
+- github.com/gin-gonic/gin@v1.9.1/  
+- golang.org/x/net@v0.0.0-xxxxxx/  
+- ...  
 - 每个子目录为一个 package  
 - 同一个模块下的 package 可直接通过相对路径导入  
 - 项目依赖的第三方库会被下载到 `$GOPATH/pkg/mod/`  
