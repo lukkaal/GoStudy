@@ -1,0 +1,247 @@
+1）关于容器和宿主进程
+Redis 容器进程结构（宿主视角）
+宿主 PID 命名空间：
+(假设 containerd 为 PID 1000)
+    
+1000 containerd
+└── 2345 containerd-shim       ← 容器进程代理/看门狗（由 containerd 启动）
+    └── 2350 redis-server       ← 容器里的 PID 1（主进程）
+
+...
+    ├── 2351 [redis AOF fsync]   ← Redis 后台线程，以线程或子进程形式存在
+    ├── 2352 [redis timer]
+在宿主机看来，Redis 容器进程就是普通的 Linux 进程，shim 是 Redis 的父进程，而 containerd 是 shim 的父进程。
+
+
+容器内视角
+容器内 PID 命名空间（隔离）：
+    
+1 redis-server       ← 容器中的第一个进程
+├── AOF/定时线程等（线程不是进程）
+
+容器内看不到 containerd 或 shim，只看到 redis 自己
+
+
+宿主机直接运行 Redis 的进程结构
+假设由 systemd 启动：
+
+1 systemd
+└── 3456 redis-server
+    ├── [redis AOF fsync]
+    ├── [redis timer]
+
+
+2）文件空间
+| 操作        | 路径                                                                    | 归属                  |
+| --------- | --------------------------------------------------------------------- | ------------------- |
+| 容器内部访问    | `/usr/local/etc/redis/redis.conf`                                     | ✅ 容器路径              |
+| 宿主机访问这个文件 | `/var/lib/docker/overlay2/<id>/merged/usr/local/etc/redis/redis.conf` | ✅ 宿主机路径（容器的根被挂载在这里） |
+Docker 并没有“重新创建”一个全新的文件系统，而是用了一种叫做“联合挂载（overlay filesystem）”的技术
+把多个只读镜像层和一个可写层叠加起来，形成一个隔离且独立的文件系统视图，作为容器的根目录 /。
+
+
+1. /var/lib/docker/overlay2/ —— 镜像层和容器层的实际内容存储地
+每个容器在使用 Docker 的 overlay2 存储驱动时，会在 overlay2 目录下有一个对应的文件夹。
+
+Overlay2 是 Docker 默认使用的联合挂载文件系统（overlay filesystem）。
+它将镜像层和容器的写层通过叠加技术组合成一个完整的文件系统。
+
+/var/lib/docker/overlay2/
+├── 111aaa222bbb333ccc444ddd555eee666fff777888999000aaa111bbb222ccc333/    # Ubuntu 镜像层（只读层1）
+│   └── diff/
+│       ├── bin/
+│       │   └── bash
+│       ├── lib/
+│       └── usr/
+├── 222bbb333ccc444ddd555eee666fff777888999000aaa111bbb222ccc333ddd444/    # Redis 镜像层（只读层2）
+│   └── diff/
+│       ├── bin/
+│       │   └── redis-server
+│       └── usr/
+│           └── local/
+│               └── etc/
+│                   └── redis/
+│                       └── redis.conf
+├── 333ccc444ddd555eee666fff777888999000aaa111bbb222ccc333ddd444eee555/    # 容器写层（UpperDir）
+│   ├── diff/
+│   │   ├── etc/
+│   │   │   └── hostname
+│   │   └── tmp/
+│   ├── merged/          ← 容器看到的根目录 `/`，Overlay 挂载点，合成视图 = UpperDir + LowerDir
+│   └── work/            ← Overlay 文件系统的工作目录，挂载时必须
+
+镜像层1、层2 是只读层，每个都有自己的 diff/ 目录存放该层文件
+容器启动时，overlay 文件系统会将：
+LowerDir 指向多个只读层的 diff 目录合集，类似：
+/var/lib/docker/overlay2/111aaa.../diff:/var/lib/docker/overlay2/222bbb.../diff
+
+UpperDir 指向容器写层的 diff 目录（这里是 333ccc.../diff）
+->
+/var/lib/docker/overlay2/l123abc456def/diff/
+├── bin/redis-server                 ← Redis 服务主程序
+├── usr/local/etc/redis/redis.conf  ← 默认配置文件
+├── lib/...                          ← 所需动态库等
+不能直接修改，一改就要复制到 UpperDir（“写时复制”机制）
+merged/ 目录就是容器根目录的真实映射，
+可以在宿主机上查看和访问这个目录来看到容器内的文件系统。
+->
+/var/lib/docker/overlay2/a789xyz012ghi/diff/
+├── etc/hostname                ← 容器启动时 Docker 会自动写入主机名文件
+├── tmp/some-temp-file         ← 容器内部程序运行产生的临时文件
+这个目录只有当前容器会使用，其它容器不会看到，也不会影响共享镜像层。
+
+| 层类型  | `diff/` 作用                      |
+| ---- | ------------------------------- |
+| 镜像层  | 存放该层相对于其父层的文件系统新增/改动            |
+| 容器写层 | 存放容器运行时对文件系统的写入、修改或删除（whiteout） |
+
+
+文件系统隔离 + 镜像复用 + 快速运行
+
+2. /var/lib/docker/image/ —— 镜像的元数据存储地
+| 目录                             | 内容                 | 举例                |
+| ------------------------------ | ------------------ | ----------------- |
+| `image/overlay2/imagedb/`      | 镜像元数据 JSON         | `redis` 镜像用了哪些层   |
+| `image/overlay2/layerdb/`      | 每层和 overlay2 的映射关系 | 哪个 Layer 对应哪个文件目录 |
+| `image/overlay2/distribution/` | 拉取来源信息             | 用于验证              |
+| `overlay2/`                    | 实际的只读层 & 写层文件      | 文件内容、conf、bin 等   |
+
+3. /var/lib/docker/containers/ —— 正在运行的容器状态
+/var/lib/docker/containers/
+└── <container-id>/
+    ├── config.v2.json       # 容器配置文件（环境变量、入口命令等）
+    ├── hostconfig.json      # Docker host 配置信息（挂载、网络）
+    ├── mounts/              # 数据卷的挂载点
+    ├── hostname             # 容器的主机名
+    └── logs/                # 容器日志文件（stdout、stderr）
+
+
+3）流程简要说明
+Docker 创建容器的流程简要说明：
+查看本地镜像（images）
+Docker 先看你本地有没有目标镜像，比如 redis。
+如果没有，会先从远程仓库拉取镜像。
+
+镜像由多个层组成
+镜像分层存储，底层一般是基础镜像层（如 debian, alpine）。
+这些层都存储在 /var/lib/docker/overlay2 下对应的目录里。
+
+创建容器的写层
+Docker 给容器创建一个独立的可写层，在 overlay2 目录下为这个容器单独生成一个目录，作为容器的“写时复制层”。
+这个可写层和镜像的只读层（基础镜像层和应用层）通过 OverlayFS 合成一个统一的文件系统，作为容器的根目录。
+
+启动容器，文件系统呈现
+容器运行时，合成的文件系统挂载到容器的 /。
+所有容器的修改只写入这个写层，不会影响镜像本身。
+
+
+细节呈现：
+1.docker run -it redis:latest
+步骤 1：检查 Redis 镜像（包括基础层）
+Redis 镜像的每一层（包括基础的 Ubuntu 层）都对应一个 overlay2/<layer-id>/diff/ 目录。
+这些目录已经存在于 /var/lib/docker/overlay2/ 中，作为只读层（LowerDir）。
+
+步骤 2：创建容器时，为其分配一个新的 layer-id 目录
+比如：333ccc444...，并自动创建如下目录结构：
+/var/lib/docker/overlay2/333ccc444ddd555eee666fff777.../
+├── diff/     ← UpperDir（可写层）
+├── work/     ← Overlay 挂载需要的中间目录
+├── merged/   ← 挂载点，容器看到的根文件系统（overlay mount here）
+
+步骤 3：构造 overlay mount 参数
+Docker 会构造如下 OverlayFS 挂载命令
+容器进程以 /merged 为根目录启动
+Docker 使用 Linux namespace + chroot 技术，让容器内看到的文件系统从 merged/ 开始视图，仿佛是一个完整的 Linux 系统。
+
+->
+如果用的是 docker start 或 docker restart 重启一个已有容器，那么这个容器使用的写层（UpperDir）是同一个
+
+
+4）overlay2
+结构如下:
+| 行为                    | 镜像层是否变动 | 写层是否复用  | 是否保留原数据 |
+| --------------------- | ------- | ------- | ------- |
+| `docker pull`         | 创建静态只读层 | 无       | -       |
+| `docker run`          | 使用已有镜像  | 创建新写层   | ❌ 不保留   |
+| `docker start` 已有容器   | 无变化     | 复用写层    | ✅ 保留    |
+| `docker commit` 创建新镜像 | 镜像+写层固化 | 写层变成新镜像 | ✅ 保留    |
+pull 镜像是静态的，只读的
+每个容器都有一个动态生成的可写层
+Docker 会构造如下 OverlayFS 挂载命令
+容器进程以 /merged 为根目录启动
+Docker 使用 Linux namespace + chroot 技术，让容器内看到的文件系统从 merged/ 开始视图，仿佛是一个完整的 Linux 系统。
+
+5）images
+| 功能     | 说明                             |
+| ------ | ------------------------------ |
+| 存储内容   | 镜像中每一层的文件变更（增量快照）              |
+| 记录依赖关系 | 每一层都有一个 `Parent` 字段，指向上一层      |
+| 支持镜像复用 | 多个镜像可以共享底层层，比如不同的应用都用 Ubuntu   |
+| 提供版本快照 | 每个 image 都是完整的构建快照，可以基于它构建新的镜像 |
+
+一个镜像不是一个层，而是「一组有依赖关系的层（Layers）」
+每一个镜像（如 redis:latest）由多个只读层叠加构成。
+每一层是对上一层的增量（比如新增文件、删除文件）。
+
+docker history redis:latest 可以查看到->
+Docker 会记录这些层的父子关系，从而可以复原整个镜像文件系统。
+redis:latest
+  ↑
+[ Layer 4: 添加 redis.conf ]
+  ↑
+[ Layer 3: 安装 redis-server ]
+  ↑
+[ Layer 2: 安装 APT 工具 ]
+  ↑
+[ Layer 1: Ubuntu 基础层 ]
+
+{
+  "Id": "sha256:abcdef...",
+  "Parent": "sha256:123456...",  ← 表示依赖于哪个上一层
+  "RepoTags": ["redis:latest"]
+}
+
+6）containers
+这是 Docker 用来记录每个容器运行时元数据和日志的目录。
+它不保存镜像层，也不保存 overlay 文件内容，而是保存容器的状态数据。
+/var/lib/docker/containers/abcdef1234567890abcdef.../
+├── config.v2.json       ← 容器配置（镜像来源、挂载、env 等）
+├── hostconfig.json      ← 宿主机上的绑定、network、volume 等配置
+├── hostname             ← 容器内的主机名（比如被写入 `/etc/hostname`）
+├── mounts/              ← 存储挂载点信息（volume、bind mount）
+├── resolv.conf          ← DNS 配置（容器内 `/etc/resolv.conf`）
+├── hosts                ← `/etc/hosts` 内容
+├── log.db               ← journald 日志索引（如果用 journald）
+├── <container-id>-json.log  ← 容器标准输出日志（默认 json-file 日志驱动）
+
+| 文件名 / 目录          | 功能说明                                    |
+| ----------------- | --------------------------------------- |
+| `config.v2.json`  | 容器的核心配置，记录该容器的镜像、cmd、env、entrypoint 等   |
+| `hostconfig.json` | 宿主机绑定（网络、端口映射、volume 挂载路径等）             |
+| `hostname`        | 容器内部的主机名（如 `hostname` 命令结果）             |
+| `resolv.conf`     | 容器 DNS 配置（会绑定挂载到容器的 `/etc/resolv.conf`） |
+| `hosts`           | 容器内部 `/etc/hosts` 文件                    |
+| `mounts/`         | volume 绑定的元信息（不是 volume 数据本身）           |
+| `<id>-json.log`   | 容器的 stdout/stderr 输出（默认日志文件）            |
+
+
+关于修改容器-镜像
+容器中可以修改的内容是什么？
+可以修改：
+容器的 写层（UpperDir） 是可写的，意味着你可以修改文件系统中的：
+创建/删除文件
+安装软件（例如 apt install vim）
+更改配置文件（如 /usr/local/etc/redis/redis.conf）
+
+但注意：
+所有更改只在这个容器中生效。
+只写入容器的 UpperDir，镜像层不会变。
+一旦你删除容器，这些更改 会全部丢失（除非你用 volume 或 docker commit）。
+
+持久化：
+执行 docker commit <container> 生成新镜像
+Docker 会把这个写层内容打包成一个新的只读层，追加到原来 redis 镜像的层级链上。
+->
+下次基于这个新镜像 docker run 容器时
+Docker 会从这个新镜像的所有只读层叠加起来，展现一个完整的文件系统（包含改动）。
+同时为这个新容器创建一个新的写层（UpperDir），用于该容器运行时的文件变更。
