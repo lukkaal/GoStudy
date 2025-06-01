@@ -1,0 +1,316 @@
+1）
+| 场景        | 是否推荐用 defer |
+| --------- | ----------- |
+| 文件/网络连接关闭 | ✅ 推荐        |
+| 互斥锁解锁     | ✅ 推荐        |
+| panic 恢复  | ✅ 推荐        |
+| 高性能内层循环   | ⚠️ 视情况而定    |
+
+
+
+2）panic
+panic 就是 Go 语言里的**“致命错误”机制**，
+触发后会立即中止当前函数，并开始向上传播（栈展开），直到程序崩溃或被 recover() 捕捉。
+
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	fmt.Println("主程序启动")
+
+	go safeGo(func() {
+		fmt.Println("任务开始")
+		var a []int
+		fmt.Println(a[1]) // ❌ panic: 越界访问
+		fmt.Println("任务结束") // 不会执行
+	})
+
+	// 让主程序等一会儿，看 goroutine 执行效果
+	time.Sleep(1 * time.Second)
+	fmt.Println("主程序继续运行，不受影响")
+}
+
+// safeGo 启动 goroutine，并保护内部 panic
+func safeGo(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Println("捕获 goroutine 崩溃:", r)
+			}
+		}()
+		fn()
+	}()
+}
+
+a[1] 越界访问，正常会 panic 崩溃。
+但我们使用 safeGo() 启动 goroutine 并用 defer + recover() 包裹。
+当发生 panic 时，它被捕获并打印，不会影响主程序或其他 goroutine。
+
+
+
+3）goroutine只是轻量化，但是依然需要主程序去管理
+
+goroutine 是并发执行的，主程序不会自动等待它们结束。
+如果主函数执行完了，程序就退出了，所有 goroutine 都会被强制终止。
+如果你开了很多 goroutine，没有机制去控制它们，可能会无限制增长导致资源耗尽。
+| 管理方式              | 作用                | 适用场景          |
+| ----------------- | ----------------- | ------------- |
+| `sync.WaitGroup`  | 等待所有 goroutine 完成 | 批量任务并发，等待全部结束 |
+| `context.Context` | 取消通知，控制协程生命周期     | 服务器优雅关机，任务取消  |
+| 通道（channel）       | 传递数据，通知信号         | 任务结果传递，协调协程工作 |
+
+
+不管是 C++ 里的线程，还是 Go 里的协程（goroutine），它们本质上都是并发执行的“任务单位”。
+程序的主逻辑（主程序）需要负责管理这些并发任务的生命周期，比如启动、同步（等待完成）、取消、异常处理等。
+
+只是实现机制和开销不同：
+C++ 线程是操作系统级别的重量级线程，启动和切换开销较大。
+Go 协程是用户态轻量级线程，由 Go 运行时调度，启动快，切换快，可以成千上万同时运行。
+
+
+
+4）
+意思是，cpp中epoll模型是一个线程专门负责轮询？然后其他线程池负责执行epoll执行回调
+
+然后go也是一个线程负责轮询，但是是把连接丢到协程当中对吗？
+然后有另一个专门的线程负责epoll轮询这些文件描述符，然后唤醒这些协程被runtime调度？
+
+
+->
+C++ epoll 模型（典型实现）
+一个或多个线程专门调用 epoll_wait 进行事件轮询，阻塞等待内核通知哪些文件描述符（fd）有事件。
+当事件就绪后，这些线程从 epoll 返回活跃的 fd 列表。
+然后线程池中的线程负责读取数据、处理业务逻辑，即执行对应的回调函数。
+这种模型中，线程和 IO 事件直接绑定，线程负责监听和处理。
+
+Go runtime 的网络调度模型
+Go 运行时中有固定数量的内核线程（M，machine）组成线程池，负责运行 goroutine（G，协程）。
+Go runtime 内部有专门的网络轮询器（基于 epoll、kqueue 等），这个网络轮询器在某些线程上调用 epoll_wait 来监听所有网络连接的文件描述符。
+当有网络事件发生（如可读、可写、新连接等），网络轮询器会唤醒对应的 goroutine（挂起的协程）继续执行。
+用户代码调用诸如 conn.Read() 等阻塞操作时，实际上是由 runtime 将该 goroutine 挂起，并让底层线程执行异步等待（epoll），直到事件到来才恢复该 goroutine。
+这样，网络事件的轮询和 IO 处理在底层被分离开，协程的调度由 Go runtime 管理，协程的切换非常轻量，不需要系统线程切换。
+
+C++ epoll 线程模型
+├─ 线程池（多个线程）
+│   ├─ 线程 A
+│   │   ├─ 调用 epoll_wait 阻塞等待事件
+│   │   ├─ 接收到事件后，处理对应文件描述符读写
+│   │   └─ 执行业务回调函数
+│   ├─ 线程 B
+│   │   ├─ 调用 epoll_wait 或处理事件
+│   │   └─ 处理对应任务
+│   └─ 其他线程
+│       └─ 类似处理流程
+└─ 事件循环与任务执行直接绑定在同一线程中
+
+
+Go runtime 网络调度模型
+├─ M（固定内核线程池，少量线程）
+│   ├─ 线程 1（含网络轮询器）
+│   │   ├─ 调用 epoll_wait 监听所有连接的文件描述符
+│   │   ├─ 事件发生，唤醒对应挂起的 goroutine
+│   │   └─ 将就绪 goroutine 放入调度队列
+│   ├─ 线程 2
+│   │   └─ 执行调度队列中的 goroutine 业务逻辑
+│   └─ 其他线程
+│       └─ 同样执行 goroutine，运行时调度
+├─ G（goroutine，轻量级协程）
+│   ├─ 阻塞 IO 操作时挂起，等待网络轮询器唤醒
+│   └─ 被唤醒后继续执行业务逻辑
+└─ 网络事件轮询与业务逻辑由不同实体管理，运行时自动调度切换
+
+
+
+5）
+所以我在编写代码的时候，主程序代码中定义好负责轮询的逻辑对吧？
+相当于还是主程序在开启协程？但是go底层的runtime会帮忙管理其他的线程去执行协程？
+->
+主程序 (你写的代码)
+ ├─ 监听事件（Accept）
+ ├─ 事件到来后，主动 go 启动新的 goroutine（handleConn）
+ └─ 其他业务逻辑
+
+Go runtime
+ ├─ 线程池（M）调用 epoll_wait 等待 IO 事件
+ ├─ IO 事件到达，唤醒对应 goroutine（G）
+ ├─ 调度器分配线程运行活跃的 goroutine
+ └─ 负责 goroutine 的挂起、恢复和调度
+
+你的代码角色
+主程序负责“监听事件”和“决定何时开启新的 goroutine”。
+比如监听新连接、读取请求、写响应等，遇到需要并发处理的场景，主动用 go 关键字启动新的协程。
+你的代码中写的“轮询逻辑”通常是调用如 listener.Accept()，这会阻塞（实际是挂起当前协程），等待事件到来。
+
+Go runtime 的角色
+Go runtime 负责调度和管理底层线程（M）和协程（G），自动把挂起的协程挂起来，等待对应的 IO 事件（由内核的 epoll 等机制检测）。
+当事件准备好时，runtime 唤醒对应的 goroutine，并将它们安排到某个线程执行。
+运行时底层会维护少量线程池（M），执行成百上千个 goroutine，帮你隐藏了线程切换和系统调用细节。
+
+->
+主程序主动“开 goroutine”，写业务和轮询代码。
+Go runtime 自动“管理线程”，帮你调度数以千计的 goroutine，透明高效地利用操作系统资源。 
+
+
+
+6）
+在cpp中，还要自己维护线程池，但是golang中不用，因为有go runtime对吧？
+->C++ 中：程序员手动管理线程池
+特点：
+你需要 显式创建线程池，决定线程数量。
+你还要设计任务队列、线程同步、任务分发等逻辑。
+示例组件：std::thread + 自己写的线程池类，或使用第三方库（如 boost::asio, ThreadPool 等）。
+
+举个例子：
+ThreadPool pool(4); // 开4个线程
+pool.enqueue([]{ handle_request(); }); // 手动把任务扔进池子
+
+
+->Go 中：由 Go runtime 自动管理“协程池 + 线程池”
+特点：
+你只需用 go 关键字启动一个 goroutine，无需关心线程的创建与销毁。
+Go runtime 会自动维护：
+可伸缩的 线程池（M）
+轻量级调度器 P
+数以万计的 goroutine（G）
+
+示例（几乎是“开箱即用”）：
+go handleRequest(conn) // 自动调度，无需关心线程资源
+Go 的调度器是 用户态协程调度器（非内核线程），非常轻量高效。
+
+
+
+7）没有父与子，统一接受 runtime 管理
+接受连接的，也是个协程
+->而真正的主协程，有个阻塞等待退出信号的 sigChan
+func main() {
+    ln, _ := net.Listen("tcp", ":8080")
+    go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return // 监听关闭  主协程调用 cancel() 后，这里收到信号，退出 for 循环
+				default:
+					continue
+				}
+			}
+			wg.Add(1)
+			go handleConn(ctx, conn, wg)
+		}
+	}()
+}
+在这个场景中：
+main() 中的 ln.Accept() 阻塞，但不会影响其他 goroutine 的运行。
+handleConnection(conn) 是每次新连接创建的 goroutine，它的生命周期与 main() 无关。
+如果你在 handleConnection() 中又创建 goroutine，它们同样是独立调度的。
+
+
+
+8）优雅退出
+| 项目      | C++                    | Go                       |
+| ------- | ---------------------- | ------------------------ |
+| 主线程控制   | 明确释放线程池                | 主协程用 context + WaitGroup |
+| 协程退出方式  | 条件变量、信号量               | `<-ctx.Done()` + 信号监听    |
+| IO 退出处理 | select/poll/epoll 中断控制 | `context` 取消 + 超时设置      |
+
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+)
+
+func handleConn(ctx context.Context, conn net.Conn, wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer conn.Close()
+
+	buf := make([]byte, 1024)
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("Connection handler shutting down")
+			return
+		default:
+			conn.SetReadDeadline(time.Now().Add(1 * time.Second)) // 避免永久阻塞
+			n, err := conn.Read(buf)
+			if err != nil {
+				continue
+			}
+			fmt.Println("Received:", string(buf[:n]))
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := &sync.WaitGroup{}
+
+	// 监听信号
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// 启动 TCP 监听
+	ln, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		panic(err)
+	}
+	defer ln.Close()
+
+	// 接受连接
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return // 监听关闭  主协程调用 cancel() 后，这里收到信号，退出 for 循环
+				default:
+					continue
+				}
+			}
+			wg.Add(1)
+			go handleConn(ctx, conn, wg)
+		}
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// 等待退出信号
+	<-sigChan
+	fmt.Println("Shutting down server...")
+	cancel() // 通知所有 goroutine 退出
+	ln.Close()  // 触发 Accept() 返回错误，让监听 goroutine 退出
+	wg.Wait() // 等待所有协程退出
+	fmt.Println("Server gracefully stopped.")
+}
+
+主协程负责阻塞
+主协程收到 OS 信号（<-sigChan）
+打印退出提示
+cancel() 通知所有 goroutine 停止工作（用于 ctx.Done()）
+调用 ln.Close()，使 Accept() 返回错误（否则 goroutine 卡在 Accept 上）
+goroutine 检查到 ctx.Done() 后 return，for 循环退出
+WaitGroup.Wait() 等待所有 goroutine 完成
+打印“graceful stopped”
+
+
+重点：我明白了，其实两种语言，主程序都是在等待退出信号对吧？
+主程序的核心逻辑本质上都是->
+等待系统退出信号（如 Ctrl+C、SIGINT 等）
+收到信号后启动优雅关闭流程：
+通知所有工作协程/线程停止处理新请求
+关闭监听资源，打断阻塞的 accept 调用
+等待所有工作协程/线程完成当前任务并退出
+清理资源，程序退出
