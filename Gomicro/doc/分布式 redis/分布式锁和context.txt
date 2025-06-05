@@ -1,0 +1,26 @@
+1）redis.Pool.GetContext(ctx context.Context)
+如果连接池已满且 wait == true，就会“等待连接归还”。
+但如果 ctx 设置了超时时间，则最多等待到 ctx 超时。
+避免了 goroutine 永远卡死在一个连接请求上
+
+
+
+2）context 生命周期
+context.Context 是 Go 用来控制协程之间“生命周期”、传递“取消信号”、“超时”和“请求范围变量”的机制。
+| 用途         | 举例说明                       |
+| ---------- | -------------------------- |
+| **控制超时**   | 设置数据库或网络请求在 5 秒内必须返回       |
+| **手动取消操作** | 用户取消操作、父任务取消，子任务也退出        |
+| **上下文传值**  | 在中间件中传递 traceID、userID 等信息 |
+
+
+
+3）context.Context 接口的结构体
+| 类型名                 | 用途                               |
+| ------------------- | -------------------------------- |
+| `context.emptyCtx`  | `context.Background()` 返回的默认 ctx |
+| `context.cancelCtx` | `context.WithCancel()` 创建的上下文    |
+| `context.timerCtx`  | `context.WithTimeout()` 返回的上下文   |
+| `context.valueCtx`  | `context.WithValue()` 返回的上下文     |
+
+<-ctx.Done() 等待 ctx.Done() 返回的 channel 被关闭

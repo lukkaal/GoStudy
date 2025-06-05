@@ -1,0 +1,85 @@
+1.
+1.go.work 文件所在的目录（即 Workspace 的根目录）
+
+这个目录本身通常是不包含go.mod 文件的。
+go.work 文件是用来定义一个多模块工作区的，它不是一个 Go 模块本身。
+2. go.work 文件中 use 指令所列出的每一个路径
+
+这些路径所指向的目录，必须包含一个 go.mod 文件。
+因为 use 指令的作用就是告诉 Go 工具链：“请将这个路径下的目录视为一个独立的 Go 模块，并将其包含在当前工作区中。” 而一个目录之所以被识别为一个 Go 模块，其标志就是它根目录下存在 go.mod 文件。
+用图示再清晰地说明一下：
+
+/my_go_workspace/      <-- 这是你的 Workspace 根目录
+├── go.work            <-- 这是 go.work 文件，**此目录本身没有 go.mod**
+|
+├── module_a/          <-- 这个目录必须包含 go.mod
+│   └── go.mod
+│   └── main.go
+|
+├── module_b/          <-- 这个目录必须包含 go.mod
+│   └── go.mod
+│   └── lib.go
+|
+└── shared_libs/
+    └── common_utils/  <-- 这个目录必须包含 go.mod
+        └── go.mod
+        └── helpers.go
+
+总结：
+Workspace 的根目录（包含 go.work 的目录）本身不要求有 go.mod。 它是管理者的角色。
+Workspace 中通过 use 指令明确包含的每个子目录（即 use 后面列出的路径），它们都必须是独立的 Go 模块，因此每个这样的目录下都必须**包含一个 go.mod 文件。
+
+2.
+在一个 Go 模块（即有 go.mod 文件的根目录及其子目录）内，可以有多个文件拥有 package main 声明，但它们通常位于不同的目录，代表模块内的不同可执行程序。
+
+让我们来详细解释：
+
+1. package main 的作用
+package main 声明了一个包是一个可执行程序。
+在一个 main 包中，必须包含一个 func main() 函数，这个函数是程序的入口点。
+2. Go 模块和 package main
+一个 Go 模块（由 go.mod 文件定义）可以包含多个包。这些包可以是：
+
+库包 (Library Packages)：提供可重用的函数、类型等，被其他程序导入和使用。这些包的声明通常是 package <name> (除了 main 之外的任何名称)。一个库包的目录中通常不包含 main 函数。
+应用程序包 (Application Packages)：包含 package main 和 func main()，可以编译成独立的可执行文件。
+在一个 Go 模块内部，你可以有多个应用程序包，每个应用程序包都可以编译成一个独立的可执行程序。
+
+示例结构：
+
+假设你的 go.mod 模块路径是 example.com/mymodule，其结构可能如下：
+
+/path/to/mymodule/        <-- go.mod 所在目录
+├── go.mod                <-- 声明模块 example.com/mymodule
+├── main.go               <-- package main, func main() (应用程序 A)
+├── handlers/
+│   └── users.go          <-- package handlers (库包)
+├── cmd/                  <-- 约定俗成的，放可执行程序的目录
+│   ├── server/           <-- 应用程序 B
+│   │   └── main.go       <-- package main, func main() for server
+│   └── worker/           <-- 应用程序 C
+│       └── main.go       <-- package main, func main() for worker
+└── pkg/                  <-- 约定俗成的，放库包的目录
+    └── utils/
+        └── helpers.go    <-- package utils (库包)
+
+解释：
+mymodule 这个模块的根目录有一个 main.go，它声明了 package main。这可以是一个默认的主程序。
+cmd/server/main.go 也声明了 package main，它代表模块内的另一个可执行程序（例如一个 Web 服务器）。
+cmd/worker/main.go 也声明了 package main，它代表模块内的第三个可执行程序（例如一个后台工作程序）。
+如何编译和运行这些程序？
+
+当你处于 mymodule 的根目录时：
+
+运行默认的主程序：go run main.go 或者 go run .
+运行 server 程序：go run ./cmd/server
+运行 worker 程序：go run ./cmd/worker
+或者编译成二进制文件：
+
+编译默认主程序：go build -o myapp .
+编译 server 程序：go build -o myapp-server ./cmd/server
+编译 worker 程序：go build -o myapp-worker ./cmd/worker
+重要注意点：
+
+一个包内只能有一个 main 函数： 在同一个 Go 包（同一个目录下的所有 Go 文件）中，只能有一个 func main() 函数。如果你在 main.go 和 another_file.go 都声明了 package main，并且都在同一个目录下，那么它们会属于同一个 main 包，你就只能有一个 func main()。
+推荐的目录结构： 为了清晰地组织多个应用程序包，Go 社区通常建议将它们放在一个专门的 cmd/ 目录下，每个应用程序一个子目录。
+所以，结论是：有 go.mod 的地方（一个 Go 模块内部），可以有多个包含 package main 的文件，但它们必须位于不同的包（通常是不同的目录）中，每个都代表一个独立的可执行程序。
