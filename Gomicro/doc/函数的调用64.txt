@@ -1,0 +1,40 @@
+1）定义函数类型
+type MyFuncType func(string) string
+
+func greet(name string) string {
+    return "Hello, " + name
+}
+
+func main() {
+    var f MyFuncType = greet
+    result := f("Go") ***
+    fmt.Println(result)  // 输出：Hello, Go
+}
+
+
+
+
+2）匿名函数
+go func(name string) {
+    fmt.Println("你好，", name)
+}("Go协程")
+&
+defer func() {
+		if err != nil {
+			return
+		}
+		// redislock.watchDog(ctx)
+	}()
+括号表示调用
+
+
+
+
+3）普通命名函数 启动协程
+func greet(name string) {
+    fmt.Println("你好，", name)
+}
+
+func main() {
+    go greet("Go协程")
+}

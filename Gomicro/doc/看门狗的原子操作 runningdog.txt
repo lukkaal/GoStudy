@@ -1,0 +1,16 @@
+防止在同一个 RedisLock 实例内部，看门狗协程被重复启动**。**
+
+代码体现： for !atomic.CompareAndSwapInt32(&r.runningDog, 0, 1) {}
+详细解释： 你的 Lock 方法通过 defer 语句，在成功获取锁后会调用 redislock.WatchDog(ctx)。
+如果你的应用程序是高并发的，并且多个 Goroutine 都在尝试获取 RedisLock 实例（即使是同一个 key，但 RedisLock 对象实例可能不同，或者更常见的是，如果 RedisLock 对象是全局共享的），那么一旦有任何一个 Lock 调用成功，它就会触发 WatchDog。
+然而，更核心的场景是：即使 Lock 方法本身确保了只有一个协程成功获得分布式锁，但如果你在 Lock 方法之外的其他地方（或者在 Lock 方法的复杂逻辑中）意外地或错误地再次调用了同一个 RedisLock 实例的 WatchDog 方法。
+如果没有原子操作： 假设 WatchDog 第一次被调用，它检查 r.runningDog 发现是 0，然后准备将其设置为 1。在它还没有完成写入 1 的时候，如果 WatchDog 又被第二次调用了（可能是另一个 Goroutine 或者当前 Goroutine 的一个异步回调），第二次调用也会发现 r.runningDog 还是 0（或者由于 CPU 缓存不一致而读取到旧的 0 值），于是它也会尝试启动一个看门狗协程。
+结果： 你最终会有多个看门狗协程同时运行，都试图为同一把分布式锁续期。这不仅浪费系统资源（CPU、内存），更严重的是，它可能导致竞态条件、逻辑错误，甚至使得锁的生命周期管理变得不可预测，难以调试。
+原子操作的作用： atomic.CompareAndSwapInt32(&r.runningDog, 0, 1) 是一个原子性的“看门人”。它确保了：只有第一个尝试将 r.runningDog 从 0 成功变为 1 的操作能够通过。其他同时尝试的操作都会失败，并且会被 for 循环阻塞，直到 r.runningDog 再次变为 0（即当前看门狗已经停止）。这保证了看门狗协程的单例模式：任何时候，对于给定的 RedisLock 对象，都只有一个看门狗协程在负责续期。
+保证看门狗协程停止后，其状态能够被其他 Goroutine 立即正确感知，从而允许重新启动。
+
+代码体现： defer func() { atomic.StoreInt32(&r.runningDog, 0) }()
+详细解释： 当看门狗协程（由 go func() { ... }() 启动的那个）因 ctx.Done() 信号或其他原因退出时，它需要在其 defer 函数中将 r.runningDog 重新设置为 0，表明自己已经停止。
+如果没有原子操作： 如果简单地使用 r.runningDog = 0 (非原子写入)，在多核 CPU 环境下，这个写入操作可能只在当前 Goroutine 所在的 CPU 核心缓存中生效，而没有立即同步到主内存或其他 CPU 核心的缓存。
+后果： 此时，如果有另一个 Goroutine 再次尝试调用 WatchDog 方法（例如，锁过期后又被重新获取，需要再次启动看门狗），它去读取 r.runningDog 时，可能会读取到旧的、不正确的缓存值（仍然是 1），从而错误地认为看门狗还在运行，导致无法启动新的看门狗。
+原子操作的作用： atomic.StoreInt32(&r.runningDog, 0) 保证了对 r.runningDog 的写入是原子性的，并且会强制刷新到主内存，使得这个状态的改变立即对所有 Goroutine 可见。这确保了当看门狗协程停止后，任何其他 Goroutine 都能立刻感知到 r.runningDog 已经变为 0，从而能够安全地重新启动看门狗。
