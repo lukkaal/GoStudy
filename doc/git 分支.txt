@@ -1,0 +1,75 @@
+| 命令                       | 说明                       |
+| ------------------------ | ------------------------ |
+| `git branch`             | 查看所有本地分支，当前所在分支前有 `*` 标记 |
+| `git branch -a`          | 查看所有分支（包括远程分支）           |
+| `git branch 分支名`         | 创建新分支（但不会切换过去）           |
+| `git branch -d 分支名`      | 删除本地分支（已合并）              |
+| `git branch -D 分支名`      | 强制删除本地分支（未合并也删）          |
+| `git branch -m 旧名 新名`    | 重命名分支                    |
+| `git branch -r`          | 查看远程分支                   |
+| `git branch --merged`    | 查看已合并到当前分支的分支            |
+| `git branch --no-merged` | 查看尚未合并的分支                |
+
+| 命令                          | 说明                           |
+| --------------------------- | ---------------------------- |
+| `git checkout 分支名`          | 切换到已有分支                      |
+| `git checkout -b 新分支名`      | 创建并切换到新分支                    |
+| `git checkout 提交哈希/标签`      | 切换到某次提交（处于“detached HEAD”状态） |
+| `git checkout 文件路径`         | 恢复某个文件为当前版本库中暂存区（或指定提交）内容    |
+| `git checkout 提交哈希 -- 文件路径` | 从指定提交中恢复某文件                  |
+
+git push origin --delete luka 删除远程
+git remote prune origin 清理本地缓存的远程引用
+git branch --show-current 显示当前分支名字
+
+
+
+2）完全合并
+在一个分支（比如 feature）上做了多次提交。
+想把 feature 分支的代码合并到 master。
+如果执行合并操作时，发现 feature 上有提交还没被合并进 master，就说 feature 分支“没有完全合并”。
+
+
+3）未跟踪
+新建分支的时候：
+这意味着新分支和当前分支在刚创建时，内容（包括所有目录和文件）是完全一样的。
+
+
+| 命令示例             | 说明                              |
+| ---------------- | ------------------------------- |
+| `git clean -n`   | **模拟执行**，显示将要删除的文件，但不实际删除（安全预览） |
+| `git clean -f`   | **强制删除**未跟踪文件                   |
+| `git clean -fd`  | 删除未跟踪的文件和目录                     |
+| `git clean -fx`  | 删除未跟踪的文件，包括被 `.gitignore` 忽略的文件 |
+| `git clean -fdx` | 删除未跟踪文件和目录，包括被忽略的文件             |
+
+当在不同分支间切换时，如果某些分支没有包含某些文件（没被跟踪），这些文件会留在工作目录，这时它们是未跟踪的。
+比如，branchA 没有文件 foo.txt，你在 branchB 新建了 foo.txt，切回 branchA 后，foo.txt 仍存在但未被跟踪。
+
+
+
+4）孤儿分支
+孤儿分支指的是：没有父提交的分支，即它不继承任何现有分支的提交历史。
+
+git checkout --orphan my-new-branch
+->my-new-branch 会成为一个全新分支
+它不会继承你原来分支的任何提交历史
+但你的 工作目录中的文件仍然存在（你需要手动删除它们，如果想要空目录）
+
+# 创建孤儿分支
+git checkout --orphan new-branch
+
+# 清理所有已跟踪和未跟踪的文件
+git rm -rf .
+git clean -fdx
+
+
+
+5）新建仓库：
+git init
+git remote add origin git@github.com:xxx/yyy.git
+git fetch origin
+->此时设置本地分支
+git checkout -b master origin/master
+
+
