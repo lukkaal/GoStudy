@@ -1,0 +1,129 @@
+1）package main: 这是一个可执行程序。
+import 语句:
+fmt, log, net, time：Go 标准库，用于格式化输出、日志、网络操作和时间控制。
+net/rpc：核心！ Go 语言内置的 RPC 包，提供了 RPC 服务的注册、监听和处理功能。
+"my-rpc-framework/service"：导入我们之前定义的 UserService 所在的 service 包。注意这里使用了你在 go mod init 时定义的模块路径。
+RPCServerAddress 常量: 定义了 RPC 服务器将要监听的 IP 地址和端口。这里我们用 127.0.0.1:8080，表示监听本地的 8080 端口。
+main 函数:
+userService := service.NewUserService(): 创建 UserService 的一个实例。这是包含我们业务逻辑的对象。
+rpc.Register(userService): 这是关键一步！ 它将 userService 实例注册到 net/rpc 包的内部注册表中。net/rpc 会反射检查 userService 的方法，确保它们符合 RPC 方法的签名要求。注册后，客户端可以通过 "UserService" 这个名称来调用它的方法。
+net.Listen("tcp", RPCServerAddress): 启动一个 TCP 监听器，监听指定的地址和端口。这使得服务器能够接收来自客户端的网络连接。
+defer listener.Close(): 确保在 main 函数退出时关闭监听器，释放端口资源。
+for { ... }: 一个无限循环，用于持续接受新的客户端连接。
+listener.Accept(): 阻塞式地等待并接受一个新的客户端连接。当有客户端连接时，它会返回一个 net.Conn 对象。
+go rpc.ServeConn(conn): 为每个新的客户端连接启动一个独立的 goroutine。 在这个 goroutine 中，rpc.ServeConn 函数会接管这个连接，负责读取客户端的 RPC 请求，调用 UserService 中对应的方法，并将结果序列化后回传给客户端。rpc.ServeConn 会一直处理该连接上的请求，直到连接被关闭。这样做可以确保服务器能够同时处理多个客户端连接（并发）。
+
+
+sync.WaitGroup：用于跟踪并等待所有处理连接的 goroutine 完成。
+shutdownChan：一个通道，用于在收到信号时通知 listener.Accept() 循环停止。
+os.Signal 和 signal.Notify：用于捕获操作系统的中断和终止信号。
+超时机制：使用 time.After 和 select 语句来确保服务器不会无限期地等待进行中的请求。
+
+
+2）逻辑总结
+核心目标：让 UserService 可被远程调用
+整个服务器端代码的核心目标是：将我们之前定义的 service.UserService 这个包含业务逻辑的对象，通过网络暴露出去，使得远程客户端能够像调用本地函数一样调用它的方法。
+
+关键组件和逻辑解释：
+import "net/rpc"：RPC 框架的核心
+这是 Go 语言标准库提供的 RPC 实现。它负责处理底层的网络通信、数据序列化/反序列化（默认使用 Gob 编码）、以及方法调度。
+你不需要手动去写 TCP 协议的包头、数据解析等复杂逻辑，net/rpc 都帮你搞定了。
+
+service.NewUserService()：业务逻辑实例
+userService := service.NewUserService()
+这里我们创建了 UserService 的一个实例。这个实例承载了我们所有的用户管理业务逻辑（创建、获取、更新用户）。
+它是我们 RPC 服务端真正对外提供功能的对象。
+
+
+rpc.Register(userService)：服务注册
+err := rpc.Register(userService)
+这是 net/rpc 的一个核心函数。它的作用是将 userService 这个对象注册到 net/rpc 内部的服务注册表中。
+注册过程做了什么？
+反射分析：rpc.Register 会使用 Go 的反射机制，检查 userService（实际上是 *service.UserService 类型）的所有可导出方法（方法名首字母大写）。
+方法签名检查：它会检查这些方法的签名是否符合 net/rpc 的规范：func (t *T) MethodName(argType T1, replyType *T2) error。不符合规范的方法不会被注册。
+映射建立：它在内部建立一个映射关系，将 RPC 调用的“服务名.方法名”（例如 "UserService.CreateUser"）映射到 userService 实例上的具体方法。
+服务名称：默认情况下，rpc.Register 会使用传入对象的类型名称作为服务名。所以，userService 会被注册为 "UserService" 服务。客户端在调用时就需要指定这个服务名。
+错误处理：如果注册失败（例如传入了不支持注册的类型，或者方法签名不符合要求），会返回错误。
+
+
+net.Listen("tcp", RPCServerAddress)：网络监听
+listener, err := net.Listen("tcp", RPCServerAddress)
+这部分是标准 Go 网络编程的知识。net.Listen 函数创建一个 TCP 监听器，绑定到 RPCServerAddress (127.0.0.1:8080) 上。
+它的作用是打开一个端口，等待客户端来建立连接。
+
+
+listener.Accept()：接受新连接
+conn, err := listener.Accept()
+在一个无限循环 for {} 中，listener.Accept() 会阻塞，直到有新的客户端连接到来。
+每当一个新的客户端尝试连接到服务器时，Accept() 就会返回一个 net.Conn 接口，代表了服务器和该客户端之间的网络连接。
+
+
+go rpc.ServeConn(conn)：处理单个连接
+它接管了传入的 net.Conn 连接。
+它会持续地从这个连接中读取客户端发送的 RPC 请求数据（这些数据是经过 Gob 编码的）。
+解析请求：根据请求中的服务名和方法名（例如 "UserService.CreateUser"）找到内部注册表对应的 userService 实例和 CreateUser 方法。
+解码参数：将客户端发送的参数数据（例如 CreateUserRequest 的 Gob 编码）解码为 Go 对象。
+方法调用：使用解码后的参数，调用 userService.CreateUser(req, &resp) 方法。
+编码响应：将方法执行的结果（包括 resp 中的数据和返回的 error）进行 Gob 编码。
+发送响应：将编码后的响应数据通过 conn 发回给客户端。
+阻塞性：rpc.ServeConn 会在该 goroutine 中一直阻塞，直到这个 conn 连接被客户端关闭或服务器端关闭。
+并发处理：因为每个连接都由一个独立的 goroutine 处理，所以服务器可以同时处理来自多个客户端的并发请求，互不影响。
+
+
+在引入优雅退出后，我们对上述逻辑进行了增强：
+
+os.Signal 和 signal.Notify：
+这部分代码用于捕获操作系统发送给进程的信号，例如 Ctrl+C 发送的 SIGINT 和 kill 命令（默认）发送的 SIGTERM。
+通过 sigChan := make(chan os.Signal, 1) 和 signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)，我们告诉 Go 运行时，当这些信号到达时，将它们发送到 sigChan 通道。
+
+<-sigChan：
+main 函数在启动 Accept 循环的 goroutine 后，会阻塞在 <-sigChan 这一行。
+直到收到 SIGINT 或 SIGTERM 信号，它才会从阻塞中唤醒，并执行后续的关闭逻辑。
+
+shutdownChan 和 listener.Close()：
+一旦收到关闭信号，我们 close(shutdownChan)。
+在 listener.Accept() 循环的 goroutine 中，它会检查 shutdownChan。当 Accept() 返回错误时，如果 shutdownChan 已经被关闭，它就知道这是我们主动关闭监听器导致的，从而安全地退出 Accept 循环，不再接受新的连接。
+listener.Close() 会立即关闭监听器，导致所有后续的 listener.Accept() 调用立即返回错误，从而中断接受新连接的行为。
+
+sync.WaitGroup：
+wg.Add(1)：每当启动一个新的 go rpc.ServeConn(conn) goroutine 来处理连接时，就增加 WaitGroup 的计数。
+defer wg.Done()：在每个处理连接的 goroutine 结束时（无论成功还是失败），调用 Done() 来减少计数。
+wg.Wait()：在 main 函数的关闭逻辑中，wg.Wait() 会阻塞，直到所有通过 wg.Add(1) 添加的 goroutine 都调用了 wg.Done()。这确保了所有活跃的 RPC 请求都有机会完成。
+
+超时机制：
+select { case <-done: ... case <-time.After(GracefulShutdownTimeout): ... }：为了防止某个请求长时间不完成导致服务器无法退出，我们设置了一个超时时间。如果 wg.Wait() 在超时时间内没有完成，服务器就会强制退出。
+这表明以下情况之一：
+1.确实存在仍在处理中的 RPC 请求：某个或多个 rpc.ServeConn goroutine 还在忙着处理客户端请求，或者在等待响应，它们没有在超时时间内调用 wg.Done()。
+2.rpc.ServeConn goroutine 未能正常退出：即使没有新的请求，某些 rpc.ServeConn goroutine 可能因为其他内部原因（例如底层网络连接问题、死锁等极端情况）而未能及时清理并调用 wg.Done()。
+当这个 case 执行时，main 函数将继续向下执行，退出程序。这实际上是强制关闭，因为它没有等待所有活跃的连接完全处理完毕。这是优雅关闭的“Plan B”，用于防止服务器无限期地挂起。
+
+
+
+3）关于 rpc.ServeConn
+func ServeConn(conn io.ReadWriteCloser)
+1.处理单个 RPC 连接上的所有请求：
+它会在一个内部循环中持续地从 conn 中读取数据。
+客户端发送的每个 RPC 调用请求（例如 UserService.CreateUser）都会通过这个连接传输。
+
+2.数据解码 (Unmarshal)：
+当 rpc.ServeConn 从连接中读到完整的 RPC 请求数据包时，它会使用预设的编码器（net/rpc 默认是 Go 的 Gob 编码）将二进制数据解码成 Go 语言的请求结构体（例如 *service.CreateUserRequest）。
+
+3.方法查找与调度：
+请求数据中包含要调用的服务名称（例如 "UserService"）和方法名称（例如 "CreateUser"）。
+rpc.ServeConn 会查询内部的服务注册表（就是我们通过 rpc.Register(userService) 注册的服务），找到对应的 UserService 实例和 CreateUser 方法。
+
+4.方法调用：
+它会反射性地调用找到的 Go 方法，并将解码后的请求参数传入。
+例如，它会执行类似 userService.CreateUser(decodedReq, &reply) 的操作。
+
+5.结果编码 (Marshal)：
+
+方法执行完毕后，rpc.ServeConn 会将方法返回的结果（包括 reply 指针指向的响应数据和 error）使用相同的编码器编码成二进制数据。
+rpc.ServeConn 是一个阻塞函数。它会在传入的 conn 连接上持续处理请求，直到连接被关闭（由客户端关闭或服务器端主动关闭），或者发生不可恢复的错误。
+这就是为什么我们通常在服务器端为每个新接受的连接启动一个独立的 goroutine 来运行 rpc.ServeConn(conn)：
+go func() {
+    defer wg.Done()
+    defer conn.Close()
+    rpc.ServeConn(conn) // 在这个 goroutine 中阻塞
+    fmt.Printf("Connection from %s handled and closed.\n", conn.RemoteAddr())
+}()

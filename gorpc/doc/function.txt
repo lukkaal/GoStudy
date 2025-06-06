@@ -1,0 +1,93 @@
+1) etcd 
+clientv3.New(config)
+创建与 Etcd 的连接
+etcdClient, err := clientv3.New(clientv3.Config{
+    Endpoints:   []string{"localhost:2379"},
+    DialTimeout: 5 * time.Second,
+})
+
+
+clientv3.Grant(ctx, ttl)
+向 Etcd 申请一个具有存活时间（TTL）的租约
+leaseResp, err := etcdClient.Grant(ctx, 5) // 5 秒租期
+leaseID := leaseResp.ID
+
+
+clientv3.Put(ctx, key, value, clientv3.WithLease(leaseID))
+以 key-value 形式注册服务，并绑定租约。
+_, err := etcdClient.Put(ctx, "/services/my-service", "127.0.0.1:1234", clientv3.WithLease(leaseID))
+
+
+etcdClient.KeepAlive(ctx, leaseID)
+启动一个“心跳”通道来保持租约活性。
+keepAliveChan, err := etcdClient.KeepAlive(ctx, leaseID)
+go func() {
+    for {
+        select {
+        case ka := <-keepAliveChan:
+            if ka == nil {
+                fmt.Println("KeepAlive 失效，租约过期")
+                os.Exit(1)
+            }
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+
+
+etcdClient.Delete(ctx, key)
+手动删除注册的服务键。
+_, err := etcdClient.Delete(ctx, "/services/my-service")
+
+
+etcdClient.Revoke(ctx, leaseID)
+主动撤销租约，使所有附属键立即失效
+_, err := etcdClient.Revoke(ctx, leaseID)
+
+
+os.Exit(1)
+遇到不可恢复错误时立即退出程序（如租约失效）
+
+
+2) 
+func (t *Service) UserService (args *ArgsType, reply *ReplyType) error {}
+...
+err := rpc.Register(new(UserService))
+定义服务对象 (Service Object)
+
+
+net.Listen(network, address string) (net.Listener, error)
+创建一个网络监听器，等待客户端连接
+listener, err := net.Listen("tcp", "127.0.0.1:8080") // 监听TCP端口8080
+
+rpc.ServeConn(conn net.Conn)
+在给定的网络连接上处理传入的 RPC 请求。此函数会阻塞，通常在一个 Goroutine 中为每个连接调用。
+func main() {
+    // ... 监听器创建 ...
+    for {
+        conn, err := listener.Accept() // 接受新的客户端连接
+        if err != nil {
+            log.Printf("Accept error: %v", err)
+            break // 或继续
+        }
+        go rpc.ServeConn(conn) // 为每个连接启动一个 Goroutine 来处理 RPC 请求
+        // rpc.ServeConn 会负责从 conn 读取请求，调用注册的方法，并将结果写回 conn
+    }
+}
+
+
+rpc.NewClient(conn net.Conn) *rpc.Client
+将一个普通的网络连接封装成一个 *rpc.Client 对象，通过它来发起 RPC 调用。
+func main() {
+    // ... 建立连接 `conn` ...
+    client := rpc.NewClient(conn) // 将网络连接封装成RPC客户端
+    defer client.Close() // 确保RPC客户端在使用后关闭
+
+    // ... 发起RPC调用 ...
+}
+
+
+net.Dial(network, address string) (net.Conn, error) / net.DialTimeout(network, address string, timeout time.Duration) (net.Conn, error)
+
+(*rpc.Client).Call(serviceMethod string, args interface{}, reply interface{}) error
