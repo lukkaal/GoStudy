@@ -1,0 +1,222 @@
+docker pull bitnami/etcd:3.5.0
+
+luka@pci-2:~/GoRPC$ sudo docker run -d -p 2389:2379 -p 2380:2380 --name etcd-server bitnami/etcd:3.5.0
+eb848922c4082bfa3d278df2c8fa9fe15edbbb73ba7b6445c9aac741d5da4af6
+
+-d: 后台运行容器。
+-p 2389:2379: 这里的含义是：将主机的 2389 端口映射到容器内部的 2379 端口。这意味着你的 Go 应用程序现在需要连接主机的 2389 端口来与 Etcd 交互。
+-p 2280:2280 这个对等节点端口，我们保持不变，因为客户端通常只连接 2379（映射到 2389）这个客户端端口。
+--name etcd-server: 给容器一个可读的名称，方便管理。
+quay.io/etcd/etcd:v3.5.0: 指定要使用的镜像。
+etcd -advertise-client-urls http://0.0.0.0:2379 -listen-client-urls http://0.0.0.0:2379: 这是在容器内执行的 Etcd 命令，配置其监听所有网络接口上的 2379 端口，并通告这个地址。
+
+sudo docker logs etcd-server 查看日志
+常见的 Bitnami Etcd 容器启动失败原因：
+
+数据目录权限问题：容器内部写入数据的权限不足。
+配置错误：Etcd 启动参数或环境变量设置不当。Bitnami 镜像通常有自己的默认配置，直接运行大部分情况都没问题，但如果通过环境变量进行了覆盖，可能会出问题。
+内存不足：宿主机内存不足以运行 Etcd 容器。
+端口冲突：尽管你已经更改了宿主机的映射端口，但容器内部 Etcd 进程监听的端口（默认 2379 和 2380）如果在容器网络中被其他进程占用，也可能导致启动失败。但这种情况较少见。
+
+sudo docker start ffa152891302
+sudo docker exec -it ffa152891302 /bin/sh
+
+sudo docker stop etcd-server # 如果已退出，会提示无法停止，这是正常的
+sudo docker rm etcd-server
+
+使用 ALLOW_NONE_AUTHENTICATION=yes 环境变量重新启动 Etcd 容器 	
+sudo docker run -d -p 2389:2379 -p 2380:2380 --name etcd-server \
+  -e ALLOW_NONE_AUTHENTICATION=yes \
+  bitnami/etcd:3.5.0
+bitnami/etcd 镜像的一个安全特性。默认情况下，Bitnami 的 Etcd 镜像要求你设置一个根密码 (ETCD_ROOT_PASSWORD)。如果你没有设置，它就会报错并退出。
+由于我们现在是在开发和测试环境，不需要严格的认证，因此 Etcd 提示我们可以在启动命令中设置 ALLOW_NONE_AUTHENTICATION=yes 环境变量来允许空密码。
+
+
+1）正确情况下
+luka@pci-2:~/GoRPC$ go run server/main.go
+RPC service 'UserService' registered successfully.
+RPC server listening on 127.0.0.1:8080...
+Etcd lease granted with ID: 694d97435a802f05, TTL: 10 seconds
+Service registered in Etcd: Key=/myrpc/services/UserService/127.0.0.1:8080, Value=127.0.0.1:8080
+Etcd keep-alive goroutine started for lease.
+
+Etcd lease granted...: 这表明你的 RPC 服务器已经成功连接到 Etcd，并且获得了用于维持服务在线状态的租约。
+Service registered in Etcd...: 这确认了服务器已经将其自身的服务地址 (127.0.0.1:8080) 注册到了 Etcd 中的指定键 (/myrpc/services/UserService/127.0.0.1:8080)。
+Etcd keep-alive goroutine started for lease.: 这表示后台的心跳机制已经启动，它会定期向 Etcd 发送续租请求，确保你的服务一直被 Etcd 视为“存活”。
+
+
+2）服务端：
+const (
+	// ...原有的RPCServerHost, RPCServerPort等常量...
+
+	// EtcdEndpoints Etcd集群的地址
+	EtcdEndpoints = "127.0.0.1:2389" // 监听2389端口
+	// EtcdServicePrefix 服务在Etcd中注册的键前缀
+	EtcdServicePrefix = "/myrpc/services/UserService/" 
+	// EtcdLeaseTTL Etcd租约的过期时间（秒）
+	EtcdLeaseTTL = 10 
+)
+
+-> 连接地址和超时 /  etcdCtx 控制后续所有 Etcd 操作的生命周期，特别是租约和心跳
+// 初始化 Etcd 客户端
+etcdClient, err := clientv3.New(clientv3.Config{
+	Endpoints:   []string{EtcdEndpoints},
+	DialTimeout: 5 * time.Second,
+})
+...
+
+defer func() {
+	// 确保Etcd客户端连接在main函数退出时关闭
+	fmt.Println("Closing Etcd client connection...")
+	if err := etcdClient.Close(); err != nil {
+		...
+	}
+}()
+
+// *** 用于Etcd操作的Context，控制租约和心跳的生命周期 ***
+etcdCtx, etcdCancel := context.WithCancel(context.Background())
+defer etcdCancel() // 确保Etcd Context在main函数结束时被取消
+
+->
+使用 clientv3.New 创建 Etcd 客户端，指定连接地址和超时。
+使用 defer etcdClient.Close() 确保程序退出时关闭 Etcd 连接，释放资源。
+创建一个 context.WithCancel 用于管理后续所有 Etcd 操作的生命周期，特别是租约和心跳。
+
+1.租约
+leaseResp, err := etcdClient.Grant(etcdCtx, EtcdLeaseTTL)
+...
+leaseID := leaseResp.ID
+...
+
+// 构建注册到 Etcd 的键值对
+// 键: /myrpc/services/UserService/127.0.0.1:8080 (服务前缀 + 服务实际地址)
+// 值: 127.0.0.1:8080 (实际服务地址，可扩展为更多元数据)
+serviceKey := EtcdServicePrefix + rpcServerAddress 
+serviceValue := rpcServerAddress 
+
+// 将服务信息注册到 Etcd，并绑定租约
+_, err = etcdClient.Put(etcdCtx, serviceKey, serviceValue, clientv3.WithLease(leaseID))
+...
+
+->
+etcdClient.Grant()：向 Etcd 申请一个指定 TTL (Time To Live) 的租约。租约是 Etcd 维持键值对生命周期的机制，如果租约过期或被撤销，所有绑定到该租约的键都会被自动删除。
+构建 serviceKey：由预定义的服务前缀 (EtcdServicePrefix) 加上服务器的实际监听地址 (rpcServerAddress) 组成，确保每个服务实例都有唯一的键。
+etcdClient.Put(..., clientv3.WithLease(leaseID))：将服务地址作为值，以 serviceKey 为键存入 Etcd，并将其与获得的 leaseID 绑定。
+
+2.心跳 == 定时续租（有点像是看门狗的延时操作）
+// 保持心跳：启动一个 goroutine 定期续租
+// Etcd客户端库的KeepAlive会自动发送心跳
+...
+keepAliveChan, err := etcdClient.KeepAlive(etcdCtx, leaseID)
+if err != nil {
+	...
+}
+go func() {
+	for {
+		select {
+		case kaResp := <-keepAliveChan:
+			if kaResp == nil {
+				// 通道关闭，通常意味着与Etcd的连接问题或租约过期，服务可能需要下线
+				...
+				os.Exit(1) // 简单退出，实际生产可能需要更复杂的重连或告警
+				return 
+			}
+			// 收到心跳响应，表示续租成功
+		case <-etcdCtx.Done(): // Context被取消时退出
+			...
+			return
+		}
+	}
+}()
+...
+
+3.优雅退出
+在服务器收到关闭信号（SIGINT, SIGTERM）时，除了关闭 RPC 监听和等待活跃连接完成，还需要主动从 Etcd 注销服务。
+
+// 使用新的 context，避免被 main 函数或 Etcd keep-alive 的 context 影响
+unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), 3*time.Second)
+defer unregisterCancel()
+
+// 先删除键
+_, err = etcdClient.Delete(unregisterCtx, serviceKey) 
+...
+
+// 然后撤销租约，强制Etcd移除所有相关键
+if leaseID != clientv3.NoLease {
+	fmt.Printf("Revoking Etcd lease: %x\n", leaseID)
+	_, err := etcdClient.Revoke(unregisterCtx, leaseID)
+	...
+}
+etcdCancel() // 取消Etcd客户端操作的context，这将停止控制租约和心跳的生命周期
+
+etcdClient.Delete()：主动从 Etcd 删除之前注册的 serviceKey。这能让客户端更快地感知到服务下线，避免等到租约过期。
+etecdClient.Revoke()：撤销租约，这将强制 Etcd 立即删除所有绑定到该租约的键。这是一种更强力的下线通知。
+etcdCancel()：取消用于 Etcd 客户端操作的 context，这会优雅地停止 KeepAlive 协程，防止资源泄露。
+
+
+3）关于 context
+etcdCtx, etcdCancel := context.WithCancel(context.Background())
+defer etcdCancel() // 确保 Etcd Context 在 main 函数结束时被取消
+主动终止所有 goroutine，那用 WithCancel -> 只有当服务器自己要退出的时候才会释放租约和心跳的生命周期 所以是 WithCancel
+
+unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), 3*time.Second)
+defer unregisterCancel()
+适用于有时间限制的操作
+
+cancel() 会触发所有下游 context 的取消信号 -> 若 goroutine 内有 <-ctx.Done() 的监听，调用 cancel() 后它可以感知并退出。
+“Code should call cancel even if the context is not used to stop operations early.”
+
+| 方法                     | 自动取消？        | 是否需要手动 `cancel()` | 场景说明                   |
+| ---------------------- | ------------ | ----------------- | ---------------------- |
+| `context.WithTimeout`  | ✅ **自动超时取消** | ✅ **需要**（释放定时器资源） | 用于控制操作最大持续时间           |
+| `context.WithDeadline` | ✅ **自动到期取消** | ✅ **需要**（释放资源）    | 与 Timeout 类似，但指定精确截止时间 |
+| `context.WithCancel`   | ❌ **不会自动取消** | ✅ **必须手动调用**      | 手动控制取消操作（例如外部信号、错误等）   |
+
+
+
+4）客户端
+封装服务发现的逻辑和状态
+type serviceDiscovery struct {
+	etcdClient       *clientv3.Client
+	serviceAddresses []string    // 存储发现到的服务地址列表
+	mu               sync.RWMutex // 读写锁保护serviceAddresses，确保并发安全
+	stopWatchChan    chan struct{} // 用于通知监听Etcd变化的goroutine停止
+}
+
+
+NewServiceDiscovery 构造函数：
+初始化服务发现客户端，并进行首次服务加载和启动监听
+建立与 Etcd 的连接。
+调用 loadServices 首次从 Etcd 拉取当前所有注册的服务列表，填充 serviceAddresses。
+启动一个独立的 goroutine 运行 watchServices，以便实时监听 Etcd 中服务状态的变化。
+
+
+loadServices：首次加载服务列表
+客户端启动时，同步地从 Etcd 获取当前所有以 EtcdServicePrefix 为前缀的键值对，即所有注册的服务实例。
+etcdClient.Get(..., clientv3.WithPrefix())：获取指定前缀下所有键值对。
+遍历结果，提取服务地址（即值），并存储到 serviceAddresses 列表中。
+使用读写锁 sd.mu.Lock() 保护 serviceAddresses 的写入，确保并发安全。
+
+
+watchServices：实时监听服务变化：
+这是客户端动态发现的核心。客户端持续监听 Etcd 中服务键的变化（新增、删除）。
+etcdClient.Watch(..., clientv3.WithPrefix())：创建一个事件通道，用于接收指定前缀下的 Etcd 事件。
+在一个无限循环中监听这个通道。
+当接收到 EventTypePut 事件时（表示服务上线或更新），调用 addService 将新地址加入列表。
+当接收到 EventTypeDelete 事件时（表示服务下线或租约过期），调用 removeService 将地址从列表移除。
+addService 和 removeService 内部使用读写锁来保证 serviceAddresses 列表的并发安全更新。
+
+
+GetRandomServiceAddress：负载均衡：
+提供一个方法，从当前可用的服务列表中选择一个地址。
+使用读锁 sd.mu.RLock() 保护 serviceAddresses 的读取。
+实现了一个最简单的随机负载均衡策略：从列表中随机选择一个地址。
+
+
+main 函数中的调用流程修改：
+客户端的 RPC 调用循环将不再使用硬编码地址，而是依赖 serviceDiscovery
+
+sd, err := NewServiceDiscovery([]string{EtcdEndpoints}, EtcdServicePrefix)
+	...
+	serverAddr, err := sd.GetRandomServiceAddress()
+...

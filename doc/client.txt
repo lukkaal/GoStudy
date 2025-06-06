@@ -1,0 +1,54 @@
+1）
+import "net/rpc": 客户端同样需要导入 net/rpc 包来发起 RPC 调用。
+
+import "my-rpc-framework/service": 客户端需要导入 service 包，以便使用其中定义的 User、CreateUserRequest、CreateUserResponse 等结构体。这些结构体是客户端与服务器端之间约定好的数据传输格式。
+
+rpc.Dial("tcp", RPCServerAddress):
+这是客户端连接 RPC 服务器的核心函数。
+它尝试通过 TCP 协议连接到 RPCServerAddress 指定的服务器地址 (127.0.0.1:8080)。
+如果连接成功，它会返回一个 *rpc.Client 对象，这个对象代表了与远程 RPC 服务器的连接，你可以通过它来发起 RPC 调用。
+如果连接失败（例如服务器没有启动或地址不正确），它会返回错误。
+
+defer client.Close(): 确保在 main 函数退出时关闭与服务器的 RPC 连接，释放资源。
+
+client.Call(serviceMethod string, args interface{}, reply interface{}) error:
+这是客户端发起 RPC 调用的核心方法。
+
+serviceMethod：一个字符串，格式为 "服务名.方法名"。在这里，我们的服务名是 UserService (因为服务器端注册时使用了 rpc.Register(userService)，默认就是结构体名称)，方法名是我们想要调用的 CreateUser、GetUser、UpdateUser。
+args：指向请求参数的指针或值。这里我们传入 createReq 等请求结构体。注意，这里是传入值，因为 net/rpc 会通过 Gob 编码处理它。
+reply：指向一个变量的指针，用于接收服务器返回的结果。服务器会将结果写入这个指针指向的内存。例如，&createResp。
+error：client.Call 会返回一个错误，这个错误通常表示通信层面的问题（例如网络断开、服务器内部错误等），而不是业务逻辑错误。
+
+业务错误处理 (if createResp.Error != "")：
+客户端接收到响应后，会检查响应结构体中的 Error 字段（例如 createResp.Error）。
+这是我们设计用来传递业务逻辑错误（例如“用户不存在”）的方式，与 client.Call 返回的通信错误区分开来。
+多次调用：客户端代码演示了如何连续调用 CreateUser、GetUser 和 UpdateUser 方法，并验证结果。
+
+2）重要代码与逻辑
+连接服务器：rpc.Dial
+client, err := rpc.Dial("tcp", RPCServerAddress)
+if err != nil {
+    log.Fatalf("Failed to dial RPC server: %v", err)
+}
+defer client.Close() // 确保连接关闭
+建立连接: rpc.Dial 是客户端与 RPC 服务器建立连接的入口。它本质上是建立了一个底层的 TCP 连接。
+返回 *rpc.Client 对象: 如果连接成功，它会返回一个 *rpc.Client 实例。这个 client 对象是后续所有远程调用的句柄。
+连接管理: 使用 defer client.Close() 确保在 main 函数结束时，与服务器的连接会被妥善关闭，释放资源。
+
+
+发起远程调用：client.Call
+核心方法: client.Call 是发起单个 RPC 调用的核心方法。
+参数构成:
+"UserService.CreateUser": 这是服务名和方法名的组合字符串。服务名 (UserService) 对应服务器端通过 rpc.Register 注册的结构体类型名称。方法名 (CreateUser) 是我们想要调用的那个业务方法。
+createReq: 请求参数。客户端将这个结构体的数据发送给服务器。net/rpc 会使用 Gob 编码将其序列化。
+&createResp: 响应结果的指针。服务器处理完请求后，会将结果数据（同样是 Gob 编码的）反序列化并填充到这个指针指向的结构体中。
+
+返回值 error 的语义:
+client.Call 返回的 error 主要表示通信层面的问题，例如网络错误、连接断开、服务器内部处理 RPC 协议的错误等。
+不代表业务逻辑错误！业务逻辑上的错误（如“用户不存在”、“参数校验失败”）通常会封装在响应结构体（例如 createResp.Error）中，这是我们自定义的协议，需要客户端自行检查。
+
+数据序列化与反序列化（隐式）
+虽然代码中没有明确看到 gob.Encode 或 gob.Decode，但 net/rpc 在 client.Call 和服务器端的 rpc.ServeConn 内部已经自动处理了请求参数和响应结果的 Gob 编码和解码。
+这就是为什么客户端和服务器端必须对 service 包中定义的结构体（如 User, CreateUserRequest 等）有相同的认知，因为它们是 Gob 编码和解码的蓝本。
+
+总而言之，RPC 客户端代码的关键在于建立与远程服务器的连接，然后通过 client.Call 方法以约定好的服务名、方法名、请求参数和响应结果结构体，发起远程函数调用，并正确地区分和处理通信错误与业务逻辑错误。它使得远程服务的调用体验尽可能地接近本地函数调用。
