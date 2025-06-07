@@ -1,0 +1,20 @@
+1）
+特性	protoc-gen-go	protoc-gen-go-grpc
+主要功能	生成 Protobuf 消息结构体、枚举、基本服务接口	|| 	生成 GRPC 服务端接口和客户端存根代码
+核心目的	处理 Protobuf 消息的序列化和反序列化   ||	实现 GRPC 协议栈的客户端和服务端通信
+依赖关系	独立处理 Protobuf 消息，但通常是 GRPC 的前置步骤	||	依赖于 protoc-gen-go 生成的消息结构体
+命令行选项	由 protoc --go_out 触发	||	由 protoc --go-grpc_out 触发
+输出文件后缀	通常生成 *.pb.go	 || 	通常与 *.pb.go 文件合并（在同一个文件中），或单独指定输出路径
+
+protoc-gen-go 会为我们定义 User、CreateUserRequest 等消息结构体
+protoc-gen-go-grpc 则会为我们生成 UserServiceClient 和 UserServiceServer 接口以及相关的 GRPC 注册代码。
+
+->
+sudo apt install protobuf-compiler
+protoc --version
+应该会看到 libprotoc X.Y.Z 这样的版本信息
+protoc --go_out=. --go_opt=paths=source_relative \
+       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+       api/user_service.proto
+读取 api/user_service.proto 文件，然后使用 protoc-gen-go 和 protoc-gen-go-grpc 这两个 Go 插件
+在 api/ 目录下（相对于命令执行目录）生成一个名为 user_service.pb.go 的 Go 源文件。 
