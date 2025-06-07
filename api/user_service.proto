@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+option go_package = "ProtoGoRPC/api";
+
+package userservice; // 定义了服务和消息的包名
+
+// --- 消息定义 (Message Definitions) ---
+// 这些是你的 RPC 方法的请求和响应的数据结构。
+// 它们定义了数据将如何序列化和反序列化。
+
+// CreateUserRequest: 用于创建用户的请求
+message CreateUserRequest {
+  string name = 1;  // 字段 1：用户姓名
+  string email = 2; // 字段 2：用户邮箱
+  int32 age = 3;    // 字段 3：用户年龄
+}
+
+// CreateUserResponse: 创建用户后的响应
+message CreateUserResponse {
+  string id = 1;      // 字段 1：新创建用户的唯一 ID
+  string message = 2; // 字段 2：操作结果消息
+}
+
+// GetUserRequest: 用于按 ID 获取用户的请求
+message GetUserRequest {
+  string id = 1; // 字段 1：要获取的用户 ID
+}
+
+// GetUserResponse: 获取用户后的响应（返回用户详细信息）
+message GetUserResponse {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  int32 age = 4;
+}
+
+// --- 服务定义 (Service Definition) ---
+// 这里定义了你的 GRPC 服务接口，以及其中包含的 RPC 方法。
+// 这是客户端可以调用的远程函数集合。
+
+service UserService {
+  // CreateUser 方法:
+  // 这是一个一元 RPC（Unary RPC），表示一个简单的请求-响应模式。
+  // 客户端发送一个 CreateUserRequest，服务端返回一个 CreateUserResponse。
+  rpc CreateUser (CreateUserRequest) returns (CreateUserResponse);
+
+  // GetUser 方法:
+  // 同样是一个一元 RPC。
+  // 客户端发送一个 GetUserRequest（包含用户 ID），服务端返回一个 GetUserResponse（包含用户详情）。
+  rpc GetUser (GetUserRequest) returns (GetUserResponse);
+}
