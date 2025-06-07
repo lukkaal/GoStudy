@@ -1,0 +1,22 @@
+1）
+grpc.Dial(serverAddr, ...)：
+这是建立与 GRPC 服务器连接的核心函数。
+serverAddr 是我们硬编码的服务器地址 (localhost:8080)。
+grpc.WithTransportCredentials(insecure.NewCredentials()) 指定连接不使用传输层安全（TLS）。
+返回一个 *grpc.ClientConn 对象，这是与 GRPC 服务器的底层连接。
+
+defer conn.Close()：
+确保在 main 函数退出时，GRPC 连接会被正确关闭，释放资源。
+
+c := pb.NewUserServiceClient(conn)：
+使用之前建立的连接 conn，通过生成的工厂函数 pb.NewUserServiceClient 创建一个 UserServiceClient 接口的实例。这个 c 就是我们用来调用远程方法的客户端存根。
+
+context.WithTimeout(context.Background(), time.Second)：
+GRPC 方法的第一个参数是 context.Context。它用于控制 RPC 的生命周期，例如设置请求超时、传递请求头信息等。
+这里我们设置了一个 1 秒的超时。如果 RPC 请求在 1 秒内没有完成，context 就会被取消，RPC 会自动终止。
+
+c.CreateUser(ctx, createReq) 和 c.GetUser(ctx, getReq)：
+这是实际的 RPC 调用！
+我们像调用本地函数一样，通过客户端存根 c 调用 CreateUser 和 GetUser 方法。
+传入 context 和 Protobuf 请求消息（*pb.CreateUserRequest 或 *pb.GetUserRequest）。
+它们会返回 Protobuf 响应消息（*pb.CreateUserResponse 或 *pb.GetUserResponse）和 error。
